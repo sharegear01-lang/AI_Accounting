@@ -1,0 +1,24 @@
+# AI 编排
+langgraph>=1.2.0
+langgraph-checkpoint-postgres>=3.0.5
+langgraph-prebuilt>=1.1.0
+langchain-core>=1.4.0
+langchain-deepseek>=1.0.1
+
+# Web 框架
+fastapi>=0.135.0
+uvicorn>=0.46.0
+sse-starlette>=3.3.0
+python-multipart>=0.0.32
+
+# 数据库
+SQLAlchemy[asyncio]>=2.0.48
+psycopg[binary]>=3.3.3
+
+# 配置
+pydantic-settings>=2.12.0
+python-dotenv>=1.2.0
+
+# OCR & 图片
+dashscope>=1.25.0
+Pillow>=12.0.0
