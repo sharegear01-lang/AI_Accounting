@@ -1,6 +1,7 @@
 """Chat 路由 - POST /chat"""
 
 import base64
+import time
 
 from fastapi import APIRouter, HTTPException
 from langchain_core.messages import HumanMessage
@@ -8,6 +9,9 @@ from langchain_core.messages import HumanMessage
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.agent.graph import compile_graph
 from app.services.ocr_service import recognize_image
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
 
@@ -22,14 +26,20 @@ async def chat(request: ChatRequest):
     - 纯文本：直接发送给 Agent 处理
     - 带图片：先 OCR 识别，再将识别结果 + 用户消息一起发给 Agent
     """
+    start_time = time.time()
+    logger.info(f"[/chat] 收到请求 | thread={request.thread_id} | 消息: {request.message[:80]} | 含图片: {bool(request.image_base64)}")
+
     try:
         # 构造用户消息
         user_content = request.message
 
         # 如果有图片，先 OCR
         if request.image_base64:
+            logger.info("[/chat] 检测到图片，开始 OCR 识别...")
             image_bytes = base64.b64decode(request.image_base64)
             ocr_text = await recognize_image(image_bytes)
+            logger.info(f"[/chat] OCR 完成 | 识别文字长度: {len(ocr_text)}")
+            logger.debug(f"[/chat] OCR 结果: {ocr_text[:200]}")
             user_content = (
                 f"[以下是用户上传的订单截图经 OCR 识别出的文字内容]\n"
                 f"{ocr_text}\n\n"
@@ -44,14 +54,21 @@ async def chat(request: ChatRequest):
         }
         config = {"configurable": {"thread_id": request.thread_id}}
 
+        logger.debug("[/chat] 调用 Agent...")
         result = await _agent_app.ainvoke(input_state, config=config)
 
         # 取最后一条 AI 回复
         reply = result["messages"][-1].content
+        elapsed = time.time() - start_time
+        logger.info(f"[/chat] 请求完成 | 耗时: {elapsed:.2f}s | 回复长度: {len(reply)}")
 
         return ChatResponse(reply=reply, thread_id=request.thread_id)
 
     except TimeoutError as e:
+        elapsed = time.time() - start_time
+        logger.error(f"[/chat] 超时 | 耗时: {elapsed:.2f}s | {e}")
         raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
+        elapsed = time.time() - start_time
+        logger.exception(f"[/chat] 异常 | 耗时: {elapsed:.2f}s | {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=f"服务器内部错误：{str(e)}")

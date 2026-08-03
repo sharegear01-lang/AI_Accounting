@@ -28,6 +28,7 @@ Thumbs.db
 # ===== 生成文件 =====
 *.png
 graph.png
+logs/
 
 # ===== 测试/临时 =====
 test_*.py

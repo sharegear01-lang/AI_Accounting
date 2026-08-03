@@ -1,6 +1,6 @@
 # PROJECT_STATE：AI 会计助手 - 项目状态追踪
 
-## 当前阶段：MVP 核心功能已完成，进入联调优化
+## 当前阶段：MVP 核心功能全部完成，进入 Phase 2 迭代
 
 ## 已完成
 
@@ -31,19 +31,24 @@
 
 ### Step 4: API 层 ✅
 - [x] app/schemas/chat.py（请求/响应模型）
-- [x] app/api/chat.py（POST /chat，SSE 流式）
+- [x] app/api/chat.py（POST /chat，ainvoke 直接返回 JSON）
 - [x] main.py（FastAPI 入口 + 路由注册）
 
-### Step 5: 联调测试
-- [x] 文本录入端到端测试（SSE 流式 + 数据库写入）
-- [ ] 图片 OCR 录入测试
+### Step 5: 联调测试 ✅
+- [x] 文本录入端到端测试（ainvoke + 数据库写入）
+- [x] 图片 OCR 录入测试（图片压缩 → OCR → Agent 记账）
 - [x] 自然语言查询测试
-- [x] SSE 流式输出验证
+- [x] ainvoke 直接响应验证
+
+### Step 6: 日志系统 ✅
+- [x] app/logger.py（统一日志配置：控制台 + 文件轮转 + 错误单独文件）
+- [x] 全模块日志覆盖（API/Agent/CRUD/OCR/Image）
+- [x] uvicorn reload_excludes 排除 logs/ 目录（防止无限重启循环）
 
 ## 后续迭代 (Phase 2)
 
+- [ ] JWT 完整鉴权（进行中）
 - [ ] HITL 人工复核（update/delete + interrupt）
-- [ ] JWT 完整鉴权
 - [ ] Vue3 前端
 - [ ] 图片前端压缩
 
@@ -59,3 +64,5 @@
 | 2026-07-30 | DeepSeek 模型：deepseek-v4-flash | 最新一代模型 |
 | 2026-07-30 | 数据库驱动：postgresql+psycopg | 环境已有 psycopg 3.3.2，无需额外安装 asyncpg |
 | 2026-07-30 | Windows 事件循环：SelectorEventLoopPolicy | psycopg 异步不支持 ProactorEventLoop |
+| 2026-07-31 | API 从 SSE 流式改为 ainvoke 直接返回 | Swagger UI 对流式支持差，MVP 阶段直接返回更直观 |
+| 2026-07-31 | 统一日志系统（控制台+文件轮转） | 便于排查问题，error.log 单独记录异常 |

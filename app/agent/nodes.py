@@ -1,5 +1,7 @@
 """LangGraph 节点实现"""
 
+import time
+
 from langchain_core.messages import SystemMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.prebuilt import ToolNode
@@ -7,6 +9,9 @@ from langgraph.prebuilt import ToolNode
 from app.config import settings
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 # ─── System Prompt ───────────────────────────────────────────────────────────
 
@@ -46,6 +51,7 @@ async def agent_node(state: AgentState) -> dict:
     from datetime import date
 
     messages = state["messages"]
+    logger.debug(f"[Agent] 输入消息数: {len(messages)} | 最后一条: {str(messages[-1].content)[:100]}")
 
     # 确保 system prompt 存在且包含最新日期
     today_str = date.today().isoformat()
@@ -55,7 +61,19 @@ async def agent_node(state: AgentState) -> dict:
     full_messages = [system_msg] + messages
 
     llm = _get_llm()
+    start = time.time()
     response = await llm.ainvoke(full_messages)
+    elapsed = time.time() - start
+
+    # 记录 LLM 决策结果
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        tool_names = [tc["name"] for tc in response.tool_calls]
+        logger.info(f"[Agent] LLM 决策: 调用工具 {tool_names} | 耗时: {elapsed:.2f}s")
+        for tc in response.tool_calls:
+            logger.debug(f"[Agent] 工具参数: {tc['name']}({tc['args']})")
+    else:
+        logger.info(f"[Agent] LLM 决策: 直接回复 | 耗时: {elapsed:.2f}s | 长度: {len(response.content)}")
+        logger.debug(f"[Agent] 回复内容: {response.content[:200]}")
 
     return {"messages": [response]}
 
@@ -77,5 +95,7 @@ def should_continue(state: AgentState) -> str:
 
     # 如果最后一条消息包含 tool_calls，则进入工具节点
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        logger.debug("[Router] → tools")
         return "tools"
+    logger.debug("[Router] → __end__")
     return "__end__"

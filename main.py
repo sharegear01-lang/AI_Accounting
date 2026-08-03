@@ -12,15 +12,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import init_db
+from app.logger import setup_logging, get_logger
+
+# 初始化日志系统
+setup_logging()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时建表，关闭时清理"""
+    logger.info("应用启动中...")
     await init_db()
-    print("✅ 数据库表初始化完成")
+    logger.info("数据库表初始化完成")
     yield
-    print("👋 应用关闭")
+    logger.info("应用关闭")
 
 
 app = FastAPI(
@@ -47,5 +53,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
+        reload_excludes=["logs/*", "__pycache__/*", ".idea/*"],
         loop="asyncio",
     )

@@ -8,6 +8,9 @@ from sqlalchemy import select, func
 
 from app.database import async_session_factory
 from app.models.transaction import Transaction
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @tool
@@ -29,23 +32,32 @@ async def add_transaction(
         description: 补充描述（可选）
         user_id: 用户ID（系统自动填充）
     """
+    logger.info(f"[add_transaction] 开始记账 | 商户: {merchant} | 金额: {amount} | 日期: {transaction_date} | 分类: {category}")
+
     try:
         parsed_date = date.fromisoformat(transaction_date)
     except ValueError:
+        logger.warning(f"[add_transaction] 日期格式错误: '{transaction_date}'")
         return f"❌ 日期格式错误：'{transaction_date}'，请使用 YYYY-MM-DD 格式。"
 
-    async with async_session_factory() as session:
-        txn = Transaction(
-            user_id=user_id,
-            merchant=merchant,
-            amount=Decimal(str(amount)),
-            category=category,
-            transaction_date=parsed_date,
-            description=description or None,
-        )
-        session.add(txn)
-        await session.commit()
-        await session.refresh(txn)
+    try:
+        async with async_session_factory() as session:
+            txn = Transaction(
+                user_id=user_id,
+                merchant=merchant,
+                amount=Decimal(str(amount)),
+                category=category,
+                transaction_date=parsed_date,
+                description=description or None,
+            )
+            session.add(txn)
+            await session.commit()
+            await session.refresh(txn)
+
+        logger.info(f"[add_transaction] 记账成功 | ID: {txn.id}")
+    except Exception as e:
+        logger.exception(f"[add_transaction] 数据库写入失败: {e}")
+        return f"❌ 记账失败：数据库写入异常。"
 
     return (
         f"✅ 记账成功！\n"
@@ -77,39 +89,49 @@ async def query_transactions(
         merchant: 按商户名称模糊搜索，为空则不限
         limit: 最多返回条数，默认50
     """
-    async with async_session_factory() as session:
-        stmt = select(Transaction).where(Transaction.user_id == user_id)
+    logger.info(f"[query_transactions] 查询 | 日期: {start_date or '不限'}~{end_date or '不限'} | 分类: {category or '全部'} | 商户: {merchant or '全部'} | limit: {limit}")
 
-        # 日期范围筛选
-        if start_date:
-            try:
-                stmt = stmt.where(
-                    Transaction.transaction_date >= date.fromisoformat(start_date)
-                )
-            except ValueError:
-                return f"❌ 起始日期格式错误：'{start_date}'"
+    try:
+        async with async_session_factory() as session:
+            stmt = select(Transaction).where(Transaction.user_id == user_id)
 
-        if end_date:
-            try:
-                stmt = stmt.where(
-                    Transaction.transaction_date <= date.fromisoformat(end_date)
-                )
-            except ValueError:
-                return f"❌ 结束日期格式错误：'{end_date}'"
+            # 日期范围筛选
+            if start_date:
+                try:
+                    stmt = stmt.where(
+                        Transaction.transaction_date >= date.fromisoformat(start_date)
+                    )
+                except ValueError:
+                    logger.warning(f"[query_transactions] 起始日期格式错误: '{start_date}'")
+                    return f"❌ 起始日期格式错误：'{start_date}'"
 
-        # 分类筛选
-        if category:
-            stmt = stmt.where(Transaction.category == category)
+            if end_date:
+                try:
+                    stmt = stmt.where(
+                        Transaction.transaction_date <= date.fromisoformat(end_date)
+                    )
+                except ValueError:
+                    logger.warning(f"[query_transactions] 结束日期格式错误: '{end_date}'")
+                    return f"❌ 结束日期格式错误：'{end_date}'"
 
-        # 商户模糊搜索
-        if merchant:
-            stmt = stmt.where(Transaction.merchant.ilike(f"%{merchant}%"))
+            # 分类筛选
+            if category:
+                stmt = stmt.where(Transaction.category == category)
 
-        # 按日期倒序
-        stmt = stmt.order_by(Transaction.transaction_date.desc()).limit(limit)
+            # 商户模糊搜索
+            if merchant:
+                stmt = stmt.where(Transaction.merchant.ilike(f"%{merchant}%"))
 
-        result = await session.execute(stmt)
-        records = result.scalars().all()
+            # 按日期倒序
+            stmt = stmt.order_by(Transaction.transaction_date.desc()).limit(limit)
+
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+    except Exception as e:
+        logger.exception(f"[query_transactions] 数据库查询失败: {e}")
+        return "❌ 查询失败：数据库异常。"
+
+    logger.info(f"[query_transactions] 查询完成 | 结果数: {len(records)}")
 
     if not records:
         return "📭 没有找到符合条件的交易记录。"

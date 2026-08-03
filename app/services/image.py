@@ -5,6 +5,9 @@ import io
 from PIL import Image
 
 from app.config import settings
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def compress_image(image_bytes: bytes) -> bytes:
@@ -21,6 +24,8 @@ def compress_image(image_bytes: bytes) -> bytes:
         压缩后的图片二进制数据（JPEG）
     """
     img = Image.open(io.BytesIO(image_bytes))
+    original_size = f"{img.size[0]}x{img.size[1]}"
+    logger.debug(f"[Image] 原始尺寸: {original_size} | 模式: {img.mode}")
 
     # 转为 RGB（处理 RGBA/P 模式的 PNG）
     if img.mode not in ("RGB", "L"):
@@ -37,6 +42,7 @@ def compress_image(image_bytes: bytes) -> bytes:
             new_h = target_width
             new_w = int(w * target_width / h)
         img = img.resize((new_w, new_h), Image.LANCZOS)
+        logger.debug(f"[Image] 缩放: {original_size} → {new_w}x{new_h}")
 
     # 逐步降低质量直到满足大小限制
     max_bytes = settings.MAX_IMAGE_SIZE_KB * 1024
@@ -46,12 +52,14 @@ def compress_image(image_bytes: bytes) -> bytes:
         buffer = io.BytesIO()
         img.save(buffer, format="JPEG", quality=quality, optimize=True)
         if buffer.tell() <= max_bytes:
+            logger.debug(f"[Image] 压缩完成 | quality={quality} | 最终大小: {buffer.tell() / 1024:.1f} KB")
             return buffer.getvalue()
         quality -= 10
 
     # 最低质量仍超限，直接返回最低质量结果
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=10, optimize=True)
+    logger.warning(f"[Image] 最低质量仍超限 | 最终大小: {buffer.tell() / 1024:.1f} KB > {settings.MAX_IMAGE_SIZE_KB} KB")
     return buffer.getvalue()
 
 
