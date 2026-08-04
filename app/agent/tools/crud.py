@@ -4,7 +4,9 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from langchain_core.tools import tool
-from sqlalchemy import select, func
+from langgraph.types import interrupt, Command
+from langgraph.errors import GraphInterrupt
+from sqlalchemy import select, update, delete, func
 
 from app.database import async_session_factory
 from app.models.transaction import Transaction
@@ -154,3 +156,168 @@ async def query_transactions(
         )
 
     return "\n".join(lines)
+
+
+@tool
+async def update_transaction(
+    transaction_id: int,
+    user_id: str = "default_user",
+    merchant: str = "",
+    amount: float = 0.0,
+    transaction_date: str = "",
+    category: str = "",
+    description: str = "",
+) -> str:
+    """修改一笔已有的交易记录。修改前需要用户确认。
+
+    Args:
+        transaction_id: 要修改的交易记录ID
+        user_id: 用户ID（系统自动填充）
+        merchant: 新的商户名称，留空表示不修改
+        amount: 新的金额，0表示不修改
+        transaction_date: 新的日期（YYYY-MM-DD），留空表示不修改
+        category: 新的分类，留空表示不修改
+        description: 新的描述，留空表示不修改
+    """
+    logger.info(f"[update_transaction] 修改交易 ID={transaction_id}")
+
+    try:
+        async with async_session_factory() as session:
+            # 查询原始记录
+            stmt = select(Transaction).where(
+                Transaction.id == transaction_id,
+                Transaction.user_id == user_id,
+            )
+            result = await session.execute(stmt)
+            txn = result.scalar_one_or_none()
+
+            if not txn:
+                return f"❌ 未找到ID为 {transaction_id} 的交易记录。"
+
+            # 构造变更预览
+            changes = {}
+            if merchant:
+                changes["商户"] = f"{txn.merchant} → {merchant}"
+            if amount != 0.0:
+                changes["金额"] = f"¥{float(txn.amount):.2f} → ¥{amount:.2f}"
+            if transaction_date:
+                changes["日期"] = f"{txn.transaction_date.isoformat()} → {transaction_date}"
+            if category:
+                changes["分类"] = f"{txn.category} → {category}"
+            if description:
+                changes["描述"] = f"{txn.description or '无'} → {description}"
+
+            if not changes:
+                return "⚠️ 没有提供任何修改字段。"
+
+            preview_lines = [f"📝 修改交易 #{transaction_id}："]
+            for k, v in changes.items():
+                preview_lines.append(f"  {k}：{v}")
+            preview = "\n".join(preview_lines)
+
+            # interrupt 暂停，等待用户确认
+            approved = interrupt({
+                "type": "update_preview",
+                "preview": preview,
+                "transaction_id": transaction_id,
+                "changes": changes,
+            })
+
+            if not approved:
+                return "❌ 用户拒绝了修改操作。"
+
+            # 用户批准，执行修改
+            update_values = {}
+            if merchant:
+                update_values["merchant"] = merchant
+            if amount != 0.0:
+                update_values["amount"] = Decimal(str(amount))
+            if transaction_date:
+                try:
+                    update_values["transaction_date"] = date.fromisoformat(transaction_date)
+                except ValueError:
+                    return f"❌ 日期格式错误：'{transaction_date}'"
+            if category:
+                update_values["category"] = category
+            if description:
+                update_values["description"] = description
+
+            if update_values:
+                stmt = update(Transaction).where(
+                    Transaction.id == transaction_id,
+                    Transaction.user_id == user_id,
+                ).values(**update_values)
+                await session.execute(stmt)
+                await session.commit()
+
+            logger.info(f"[update_transaction] 修改成功 | ID={transaction_id}")
+            return f"✅ 交易 #{transaction_id} 修改成功！\n" + "\n".join(f"  {k}：{v}" for k, v in changes.items())
+
+    except GraphInterrupt:
+        raise  # interrupt 必须向上传播，不能被 except Exception 吞掉
+    except Exception as e:
+        logger.exception(f"[update_transaction] 修改失败: {e}")
+        return f"❌ 修改失败：{str(e)}"
+
+
+@tool
+async def delete_transaction(
+    transaction_id: int,
+    user_id: str = "default_user",
+) -> str:
+    """删除一笔交易记录。删除前会暂停并展示预览，等待用户确认。
+
+    Args:
+        transaction_id: 要删除的交易记录ID
+        user_id: 用户ID（系统自动填充）
+    """
+    logger.info(f"[delete_transaction] 删除交易 ID={transaction_id}")
+
+    try:
+        async with async_session_factory() as session:
+            # 查询原始记录
+            stmt = select(Transaction).where(
+                Transaction.id == transaction_id,
+                Transaction.user_id == user_id,
+            )
+            result = await session.execute(stmt)
+            txn = result.scalar_one_or_none()
+
+            if not txn:
+                return f"❌ 未找到ID为 {transaction_id} 的交易记录。"
+
+            preview = (
+                f"🗑️ 即将删除交易 #{transaction_id}：\n"
+                f"  商户：{txn.merchant}\n"
+                f"  金额：¥{float(txn.amount):.2f}\n"
+                f"  分类：{txn.category}\n"
+                f"  日期：{txn.transaction_date.isoformat()}\n"
+                f"  描述：{txn.description or '无'}"
+            )
+
+            # interrupt 暂停，等待用户确认
+            approved = interrupt({
+                "type": "delete_preview",
+                "preview": preview,
+                "transaction_id": transaction_id,
+            })
+
+            if not approved:
+                return "❌ 用户拒绝了删除操作。"
+
+            # 用户批准，执行删除
+            stmt = delete(Transaction).where(
+                Transaction.id == transaction_id,
+                Transaction.user_id == user_id,
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+            logger.info(f"[delete_transaction] 删除成功 | ID={transaction_id}")
+            return f"✅ 交易 #{transaction_id} 已删除。"
+
+    except GraphInterrupt:
+        raise  # interrupt 必须向上传播，不能被 except Exception 吞掉
+    except Exception as e:
+        logger.exception(f"[delete_transaction] 删除失败: {e}")
+        return f"❌ 删除失败：{str(e)}"

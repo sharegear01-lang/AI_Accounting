@@ -32,3 +32,9 @@ logs/
 
 # ===== 测试/临时 =====
 test_*.py
+
+# ===== 前端 Vue3 =====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.local

@@ -1,6 +1,6 @@
 # PROJECT_STATE：AI 会计助手 - 项目状态追踪
 
-## 当前阶段：MVP 核心功能全部完成，进入 Phase 2 迭代
+## 当前阶段：Phase 2 迭代中（鉴权 ✅ / 会话记忆 ✅ / HITL 复核 ✅）
 
 ## 已完成
 
@@ -47,10 +47,29 @@
 
 ## 后续迭代 (Phase 2)
 
-- [ ] JWT 完整鉴权（进行中）
-- [ ] HITL 人工复核（update/delete + interrupt）
-- [ ] Vue3 前端
-- [ ] 图片前端压缩
+- [x] JWT 完整鉴权
+  - [x] 用户注册 / 登录 API（app/api/auth.py）
+  - [x] JWT token 签发与校验（app/auth/jwt.py）
+  - [x] 鉴权依赖注入（app/auth/dependencies.py）
+  - [x] User ORM 模型（app/models/user.py）
+- [x] 会话记忆持久化（Phase 2-1）
+  - [x] AsyncPostgresSaver checkpointer（app/checkpointer.py）
+  - [x] chat.py 使用 checkpointer 编译图，thread_id 隔离会话
+  - [x] 多轮对话记忆验证通过
+- [x] HITL 人工复核（Phase 2-2）
+  - [x] update_transaction / delete_transaction 工具（工具内 interrupt() 暂停）
+  - [x] System Prompt 支持修改/删除
+  - [x] interrupt 预览返回 + 孤儿 tool_calls 修补
+  - [x] /approve /reject 端点 + /chat 内"确认/取消"快捷回复
+  - [x] 审批流程：手动执行工具 + aupdate_state 修补 checkpoint（弃用 Command(resume)，因其无法正确从 tools 节点恢复）
+  - [x] 删除+批准 / 删除+拒绝 / 修改+批准 全流程验证通过
+- [x] Vue3 前端（frontend/）
+  - [x] Vite + Vue3 + Element Plus + vue-router + axios 技术栈
+  - [x] 登录 / 注册页面（JWT token 持久化 + 路由守卫）
+  - [x] 聊天主界面（markdown 渲染 + 图片上传前端压缩 512px）
+  - [x] HITL 确认卡片组件（检测 interrupt 预览 → 批准/拒绝按钮 → 调 /approve /reject）
+  - [x] Vite 代理 /api → 后端 8000，联调测试通过
+- [ ] 图片前端压缩（已实现基础版，待精细化）
 
 ## 关键决策记录
 
@@ -66,3 +85,6 @@
 | 2026-07-30 | Windows 事件循环：SelectorEventLoopPolicy | psycopg 异步不支持 ProactorEventLoop |
 | 2026-07-31 | API 从 SSE 流式改为 ainvoke 直接返回 | Swagger UI 对流式支持差，MVP 阶段直接返回更直观 |
 | 2026-07-31 | 统一日志系统（控制台+文件轮转） | 便于排查问题，error.log 单独记录异常 |
+| 2026-08-05 | LangGraph 1.2.9 + AsyncPostgresSaver 会话记忆 | thread_id 隔离会话，checkpointer 持久化消息历史 |
+| 2026-08-05 | 工具内 interrupt() 实现 HITL 复核 | LLM 直接调工具，interrupt 自然暂停等待确认 |
+| 2026-08-05 | 审批用 手动执行+aupdate_state，弃用 Command(resume) | LangGraph 1.2.9 的 resume 无法从 tools 节点恢复，导致 agent 重新决策 |

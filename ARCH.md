@@ -120,7 +120,44 @@ AI_Accounting/
 └── PROJECT_STATE.md
 ```
 
-## 7. 部署方案
+## 7. 前端架构（Phase 2）
+
+### 技术栈
+
+| 组件 | 选型 | 关键职责 |
+|------|------|---------|
+| 框架 | Vue 3 + Vite | 单页应用，dev server 端口 5173 |
+| UI 库 | Element Plus | 表单 / 按钮 / 消息 / 布局 |
+| 路由 | vue-router | 登录页 / 聊天页 + 路由守卫 |
+| HTTP | axios | 统一封装，JWT 自动附加，401 跳登录 |
+| Markdown | marked | AI 回复 markdown 渲染（表格等） |
+
+### 目录结构
+
+```
+frontend/
+├── index.html
+├── vite.config.js          # /api 代理到后端 8000
+├── src/
+│   ├── main.js
+│   ├── App.vue
+│   ├── router/index.js      # 路由守卫（未登录跳 /login）
+│   ├── api/index.js         # axios 实例 + JWT 拦截器
+│   ├── views/
+│   │   ├── Login.vue        # 登录 / 注册
+│   │   └── Chat.vue         # 聊天主界面（文本+图片+消息列表）
+│   └── components/
+│       └── ApprovalCard.vue # HITL 确认卡片（批准/拒绝）
+```
+
+### 前后端交互
+
+- 所有请求走 `/api` 前缀，Vite dev 代理转发至 `http://127.0.0.1:8000`。
+- JWT token 存 localStorage，axios 请求拦截器自动附加 `Authorization: Bearer`。
+- HITL：后端 interrupt 预览回复含"请回复确认批准操作"，前端检测后渲染 ApprovalCard，点击批准/拒绝调用 `/api/approve/{thread_id}` / `/api/reject/{thread_id}`。
+- 图片：前端 canvas 压缩至长边 512px / JPEG 0.7，转 base64 随聊天发送。
+
+## 8. 部署方案
 
 - PostgreSQL 通过 Docker Compose 部署，`docker compose up -d` 一键启动。
 - 后端通过 `python main.py` 或 `uvicorn main:app` 启动。
