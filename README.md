@@ -129,9 +129,7 @@ AI_Accounting/
 
 ## 文档
 
-- [PRD.md](PRD.md) - 产品需求文档
 - [ARCH.md](ARCH.md) - 技术架构设计
-- [PROJECT_STATE.md](PROJECT_STATE.md) - 项目状态追踪与关键决策记录
 
 ## 许可证
 
