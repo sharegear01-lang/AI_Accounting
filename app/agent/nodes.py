@@ -105,7 +105,7 @@ async def preprocess_node(state: AgentState, config: RunnableConfig) -> dict:
         }
 
     try:
-        ocr, raw_ocr = await recognize_structured(image_bytes)
+        ocr, raw_ocr = await recognize_structured(image_bytes, b64_hint=image_b64)
     except (TimeoutError, OpenAIError) as e:
         logger.error(f"[Preprocess] OCR 调用失败: {type(e).__name__}: {e}")
         return {

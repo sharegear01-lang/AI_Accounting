@@ -275,7 +275,7 @@ def is_raw_boxes(text: str) -> bool:
 
 
 async def recognize_structured(
-    image_bytes: bytes, max_attempts: int = 2
+    image_bytes: bytes, max_attempts: int = 2, b64_hint: str | None = None
 ) -> tuple["OcrResult", str]:
     """调用 OCR 并解析为 OcrResult，文本框数组模式下自动重试
 
@@ -283,13 +283,18 @@ async def recognize_structured(
     该模式无法安全提取金额。此处检测到后重试一次（模型随机，第二次
     通常回到键值模式）；仍失败则由上层闸门拦截。
 
+    Args:
+        image_bytes: 原始图片二进制数据
+        max_attempts: 最大尝试次数
+        b64_hint: 前端传来的原始 base64（若可直通则复用，跳过重新压缩/编码）
+
     Returns:
         (OcrResult, 最后一次模型原始输出)
     """
     result: OcrResult | None = None
     raw = ""
     for attempt in range(1, max_attempts + 1):
-        raw = await recognize_image(image_bytes)
+        raw = await recognize_image(image_bytes, b64_hint=b64_hint)
         result = parse_ocr_output(raw)
         if result.is_bookable() or not is_raw_boxes(raw) or attempt >= max_attempts:
             break
@@ -297,19 +302,43 @@ async def recognize_structured(
     return result, raw
 
 
+def _pass_through_b64(image_bytes: bytes) -> bool:
+    """判断图片可否 base64 直通 OCR API（跳过重新压缩/编码）
+
+    条件与 compress_image 的快速路径一致：JPEG、长边在像素预算内、
+    无 EXIF 旋转。Pillow 懒加载只读头部，不重采样、不重编码。
+    """
+    try:
+        import io
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(image_bytes))
+        if (img.format or "").upper() != "JPEG":
+            return False
+        if max(img.size) > settings.IMAGE_TARGET_LONG_EDGE:
+            return False
+        if img.getexif().get(0x0112, 1) != 1:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 # ─── OCR 调用 ─────────────────────────────────────────────────────────────────
 
-async def recognize_image(image_bytes: bytes) -> str:
+async def recognize_image(image_bytes: bytes, b64_hint: str | None = None) -> str:
     """对图片进行 OCR 识别，返回模型原始输出
 
     流程：
-    1. 预处理图片（像素预算缩放 + 格式归一化）
-    2. 转为 base64
-    3. 调用 Qwen3-OCR 模型识别
-    4. 设置超时熔断（OCR_TIMEOUT_SECONDS）
+    1. （可选）base64 直通：若图片满足直通条件（JPEG/预算内/无旋转），
+       直接复用前端传来的 base64，跳过重新压缩与重新编码。
+    2. 否则预处理图片（像素预算缩放 + 格式归一化）后转 base64。
+    3. 调用 Qwen3-OCR 模型识别。
+    4. 设置超时熔断（OCR_TIMEOUT_SECONDS）。
 
     Args:
         image_bytes: 原始图片二进制数据
+        b64_hint: 前端传来的原始 base64（可直通时复用，避免"解码→再编码"）
 
     Returns:
         OCR 模型原始输出（通常为 JSON 字符串，需经 parse_ocr_output 解析）
@@ -318,11 +347,18 @@ async def recognize_image(image_bytes: bytes) -> str:
         TimeoutError: OCR 调用超时
         Exception: API 调用失败
     """
-    # 1. 预处理图片
-    logger.info(f"[OCR] 开始处理 | 原始图片大小: {len(image_bytes) / 1024:.1f} KB")
-    compressed, mime_type = compress_image(image_bytes)
-    b64_data = image_to_base64(compressed)
-    logger.info(f"[OCR] 预处理完成 | 输出格式: {mime_type} | 大小: {len(compressed) / 1024:.1f} KB")
+    # 1. 决定传输用 base64：优先直通，否则重新压缩/编码
+    if b64_hint and _pass_through_b64(image_bytes):
+        b64_data = b64_hint.split(",", 1)[-1]  # 兼容可能的 data: 前缀
+        mime_type = "image/jpeg"
+        logger.info(
+            f"[OCR] base64 直通（前端已压缩，跳过重新压缩/编码）| 尺寸: {len(image_bytes) / 1024:.1f} KB"
+        )
+    else:
+        logger.info(f"[OCR] 开始处理 | 原始图片大小: {len(image_bytes) / 1024:.1f} KB")
+        compressed, mime_type = compress_image(image_bytes)
+        b64_data = image_to_base64(compressed)
+        logger.info(f"[OCR] 预处理完成 | 输出格式: {mime_type} | 大小: {len(compressed) / 1024:.1f} KB")
 
     # 2. 构造请求
     messages = [
