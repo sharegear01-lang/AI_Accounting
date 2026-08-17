@@ -8,6 +8,7 @@ from langgraph.errors import GraphInterrupt
 
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.agent.graph import compile_graph
+from app.agent.tools.crud import execute_delete, execute_update
 from app.checkpointer import get_checkpointer
 from app.auth.dependencies import get_current_user
 from app.models.user import User
@@ -18,91 +19,100 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
 
+# 触发 interrupt 的工具名（审批路径按此从 tool_calls 中定位待确认调用）
+_HITL_TOOLS = ("delete_transaction", "delete_transactions", "update_transaction", "update_transactions")
+
 
 def _thread_config(user_id: str, thread_id: str) -> dict:
     """按用户命名空间隔离会话线程，防止跨用户访问对话记忆
 
     checkpointer 以 thread_id 为 key，若不含用户维度，A 用户复用 B 的
-    thread_id 即可读到/续接 B 的对话。这里统一加用户前缀命名空间。
+    thread_id 即可读到/续接 B 的对话。这里统一加用户前缀命名空间；
+    同时注入当前用户 ID（工具经 config 读取，多租户隔离）。
     """
-    return {"configurable": {"thread_id": f"{user_id}:{thread_id}"}}
+    return {"configurable": {"thread_id": f"{user_id}:{thread_id}", "user_id": user_id}}
 
 
-async def _execute_pending_tool(
-    tool_name: str, tool_args: dict, approved: bool, user_id: str
-) -> str:
-    """手动执行待确认的工具操作（单个或批量）
+async def _resume_graph(thread_id: str, approved: bool, user_id: str) -> ChatResponse:
+    """处理 interrupt 暂停后的审批（单个或批量）
 
-    直接操作数据库，绕过 interrupt 机制。
+    从 checkpoint 读取 interrupt payload（与预览数据完全一致），
+    批准时调用 crud 公共执行函数 execute_delete / execute_update，
+    拒绝时生成拒绝 ToolMessage，最后 aupdate_state 修补 checkpoint。
+
+    说明：不使用 LangGraph 原生 Command(resume)——1.2.9 的 resume 语义为
+    "重放整个 tools 节点"，已完成工具会被重复执行（LangGraph 官方已知
+    缺陷，PR #3126 修复未合并），故保留手动执行路径。
     """
-    from datetime import date
-    from decimal import Decimal
+    config = _thread_config(user_id, thread_id)
+    checkpointer = get_checkpointer()
+    agent_app = compile_graph(checkpointer=checkpointer)
 
-    from sqlalchemy import delete as sql_delete
-    from sqlalchemy import select, update as sql_update
+    # 1. 获取当前状态：消息历史 + 待确认的 interrupt payloads
+    state = await agent_app.aget_state(config)
+    messages = state.values.get("messages", []) if state and state.values else []
 
-    from app.database import async_session_factory
-    from app.models.transaction import Transaction
+    payloads = []
+    for task in (state.tasks or []):
+        for intr in (getattr(task, "interrupts", None) or []):
+            v = intr.value if hasattr(intr, "value") else intr
+            if isinstance(v, dict) and v.get("type") in ("delete_preview", "update_preview"):
+                payloads.append(v)
 
-    if not approved:
-        return "❌ 用户拒绝了此操作。"
+    if not payloads:
+        logger.warning(f"[/resume] 未找到待确认的 interrupt payload")
+        return ChatResponse(reply="⚠️ 没有找到待确认的操作。", thread_id=thread_id)
 
-    # 解析目标 ID 列表（兼容单个与批量工具）
-    if tool_name in ("delete_transaction", "update_transaction"):
-        ids = [int(tool_args.get("transaction_id"))] if tool_args.get("transaction_id") else []
-    else:
-        ids = [int(i) for i in (tool_args.get("transaction_ids") or [])]
-    ids = list(dict.fromkeys(ids))
+    # 2. 定位待确认的调用 ID：最后一条带 tool_calls 的 AI 消息中，
+    #    按顺序取 HITL 工具调用，与 payloads 对齐（同消息 add+delete 时，
+    #    add 不产生 payload，不会被重复执行）
+    hitl_calls = []
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            hitl_calls = [tc for tc in msg.tool_calls if tc["name"] in _HITL_TOOLS]
+            break
 
-    if not ids:
-        return "❌ 未提供交易记录ID。"
+    # 3. 逐个执行/拒绝
+    results: list[tuple[str, str]] = []
+    for idx, payload in enumerate(payloads):
+        tool_call_id = hitl_calls[idx]["id"] if idx < len(hitl_calls) else f"resume-{idx}"
+        ptype = payload.get("type")
 
-    if tool_name in ("delete_transaction", "delete_transactions"):
-        # 直接执行删除（不再走 interrupt）
-        async with async_session_factory() as session:
-            stmt = sql_delete(Transaction).where(
-                Transaction.id.in_(ids), Transaction.user_id == user_id
-            )
-            result = await session.execute(stmt)
-            await session.commit()
-        if result.rowcount == 0:
-            return "❌ 未找到匹配的交易记录。"
-        return f"✅ 已删除 {result.rowcount} 笔交易记录。"
+        if ptype == "delete_preview":
+            ids = payload.get("transaction_ids") or ([payload["transaction_id"]] if payload.get("transaction_id") else [])
+            if approved:
+                rowcount, err = await execute_delete(ids, user_id)
+                content = f"✅ 已删除 {rowcount} 笔交易记录。" if not err else err
+            else:
+                content = "❌ 用户拒绝了删除操作。"
+        elif ptype == "update_preview":
+            ids = payload.get("transaction_ids") or ([payload["transaction_id"]] if payload.get("transaction_id") else [])
+            if approved:
+                fields = dict(payload.get("fields", {}) or {})
+                rowcount, err = await execute_update(ids, fields, user_id)
+                changed = "、".join(f"{k}={v}" for k, v in fields.items())
+                content = f"✅ 已修改 {rowcount} 笔交易记录（{changed}）。" if not err else err
+            else:
+                content = "❌ 用户拒绝了修改操作。"
+        else:
+            continue
 
-    elif tool_name in ("update_transaction", "update_transactions"):
-        # 直接执行修改（不再走 interrupt）
-        update_values = {}
-        if tool_args.get("merchant"):
-            update_values["merchant"] = tool_args["merchant"]
-        if tool_args.get("amount"):
-            update_values["amount"] = Decimal(str(tool_args["amount"]))
-        if tool_args.get("transaction_date"):
-            try:
-                update_values["transaction_date"] = date.fromisoformat(tool_args["transaction_date"])
-            except ValueError:
-                return f"❌ 日期格式错误：'{tool_args['transaction_date']}'"
-        if tool_args.get("category"):
-            update_values["category"] = tool_args["category"]
-        if tool_args.get("description"):
-            update_values["description"] = tool_args["description"]
+        logger.info(f"[/resume] 待确认操作: {ptype} | approved={approved} | 结果: {content[:60]}")
+        results.append((tool_call_id, content))
 
-        if not update_values:
-            return "⚠️ 没有需要修改的字段。"
+    if not results:
+        return ChatResponse(reply="⚠️ 没有找到待确认的操作。", thread_id=thread_id)
 
-        async with async_session_factory() as session:
-            stmt = sql_update(Transaction).where(
-                Transaction.id.in_(ids), Transaction.user_id == user_id
-            ).values(**update_values)
-            result = await session.execute(stmt)
-            await session.commit()
+    # 4. 通过 aupdate_state 注入所有 ToolMessage，修补 checkpoint
+    await agent_app.aupdate_state(
+        config,
+        {"messages": [ToolMessage(content=res, tool_call_id=tid) for tid, res in results]},
+    )
+    logger.info(f"[/resume] checkpoint 已修补，tool_call_ids={[tid for tid, _ in results]}")
 
-        if result.rowcount == 0:
-            return "❌ 未找到匹配的交易记录。"
-
-        changed = "、".join(f"{k}={v}" for k, v in update_values.items())
-        return f"✅ 已修改 {result.rowcount} 笔交易记录（{changed}）。"
-
-    return f"❌ 未知工具: {tool_name}"
+    # 直接返回工具结果（agent 下次用户消息时会自动生成总结回复）
+    reply = "\n\n".join(res for _, res in results)
+    return ChatResponse(reply=reply, thread_id=thread_id)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -189,63 +199,6 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         raise HTTPException(status_code=500, detail=f"服务器内部错误：{str(e)}")
 
 
-async def _resume_graph(thread_id: str, approved: bool, user_id: str) -> ChatResponse:
-    """处理 interrupt 暂停后的审批（单个或批量）
-
-    不使用 Command(resume=...)（LangGraph resume 行为不稳定），
-    而是手动执行/跳过待确认操作，修补 checkpoint，再让 agent 生成回复。
-    """
-    config = _thread_config(user_id, thread_id)
-    checkpointer = get_checkpointer()
-    agent_app = compile_graph(checkpointer=checkpointer)
-
-    # 1. 获取当前状态，找到待执行的 tool_call
-    state = await agent_app.aget_state(config)
-    messages = state.values.get("messages", []) if state and state.values else []
-
-    # 从后往前找最后一条带 tool_calls 的 AI 消息，取出其全部待确认调用
-    pending_calls = []
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            pending_calls = msg.tool_calls
-            break
-
-    if not pending_calls:
-        logger.warning(f"[/resume] 未找到待确认的 tool_call")
-        return ChatResponse(reply="⚠️ 没有找到待确认的操作。", thread_id=thread_id)
-
-    # 跳过已执行的调用（tools_node 在 interrupt 前已完成的部分，如同一消息里的 add_transaction），
-    # 避免重复执行造成重复记账
-    executed_ids = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-
-    results: list[tuple[str, str]] = []
-    for tc in pending_calls:
-        tool_call_id = tc["id"]
-        if tool_call_id in executed_ids:
-            logger.info(f"[/resume] 跳过已执行的 tool_call: {tc['name']}({tool_call_id})")
-            continue
-        tool_name = tc["name"]
-        tool_args = tc.get("args", {}) or {}
-        logger.info(f"[/resume] 待确认操作: {tool_name}({tool_args}) | approved={approved}")
-        tool_result = await _execute_pending_tool(tool_name, tool_args, approved, user_id)
-        logger.info(f"[/resume] 工具执行结果: {tool_result[:100]}")
-        results.append((tool_call_id, tool_result))
-
-    if not results:
-        return ChatResponse(reply="⚠️ 所有待确认的操作都已被处理。", thread_id=thread_id)
-
-    # 3. 通过 aupdate_state 注入所有 ToolMessage，修补 checkpoint
-    await agent_app.aupdate_state(
-        config,
-        {"messages": [ToolMessage(content=res, tool_call_id=tid) for tid, res in results]},
-    )
-    logger.info(f"[/resume] checkpoint 已修补，tool_call_ids={[tid for tid, _ in results]}")
-
-    # 直接返回工具结果（agent 下次用户消息时会自动生成总结回复）
-    reply = "\n\n".join(res for _, res in results)
-    return ChatResponse(reply=reply, thread_id=thread_id)
-
-
 async def _handle_interrupt(agent_app, config, thread_id, preview, start_time) -> ChatResponse:
     """处理 interrupt 暂停：返回预览给用户确认
     
@@ -267,9 +220,6 @@ async def approve(thread_id: str, current_user: User = Depends(get_current_user)
     """批准被暂停的操作（修改/删除交易）"""
     logger.info(f"[/approve] 用户 {current_user.username} 批准操作 | thread={thread_id}")
     try:
-        return await _resume_graph(thread_id, approved=True, user_id=current_user.id)
-    except GraphInterrupt:
-        # 可能还有下一个 interrupt（连续多个修改操作）
         return await _resume_graph(thread_id, approved=True, user_id=current_user.id)
     except Exception as e:
         logger.exception(f"[/approve] 异常: {e}")

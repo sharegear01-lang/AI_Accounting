@@ -1,10 +1,16 @@
-"""数据库 CRUD 工具 - 供 Agent 调用"""
+"""数据库 CRUD 工具 - 供 Agent 调用
+
+安全说明：工具不再暴露 user_id 参数——当前用户 ID 经运行时 config
+（config["configurable"]["user_id"]）注入，由 API 层 JWT 鉴权写入。
+LLM 看不到、也无法伪造该字段，从根源上杜绝跨用户越权。
+"""
 
 from datetime import date, datetime
 from decimal import Decimal
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from langgraph.types import interrupt, Command
+from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from sqlalchemy import select, update, delete, func
 
@@ -15,6 +21,73 @@ from app.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _user_id(config: RunnableConfig | None) -> str:
+    """从运行时 config 读取当前登录用户 ID（由 JWT 鉴权注入）"""
+    if config is None:
+        return "default_user"
+    return (config.get("configurable") or {}).get("user_id", "default_user")
+
+
+def _parse_date(value: str) -> date | None:
+    """解析 YYYY-MM-DD；非法返回 None"""
+    try:
+        return date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+# ─── 公共执行函数（interrupt 批准后 与 审批路径 共用，杜绝双实现漂移）──────────
+
+async def execute_delete(ids: list[int], user_id: str) -> tuple[int, str]:
+    """批量删除执行。返回 (rowcount, 错误信息)；成功时错误信息为空"""
+    try:
+        async with async_session_factory() as session:
+            stmt = delete(Transaction).where(
+                Transaction.id.in_(ids), Transaction.user_id == user_id
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+        return result.rowcount, ""
+    except Exception as e:
+        logger.exception(f"[execute_delete] 批量删除失败: {e}")
+        return 0, "❌ 批量删除失败：数据库异常。"
+
+
+async def execute_update(ids: list[int], fields: dict, user_id: str) -> tuple[int, str]:
+    """批量修改执行。返回 (rowcount, 错误信息)；成功时错误信息为空
+
+    fields 中 amount / transaction_date 可能是字符串（interrupt payload 序列化后
+    传入），这里统一转换类型，保证与工具内直接构造的字段行为一致。
+    """
+    clean: dict = {}
+    for k, v in fields.items():
+        if k == "transaction_date" and isinstance(v, str):
+            parsed = _parse_date(v)
+            if parsed is None:
+                return 0, f"❌ 日期格式错误：'{v}'"
+            clean[k] = parsed
+        elif k == "amount" and isinstance(v, str):
+            try:
+                clean[k] = Decimal(v)
+            except Exception:
+                return 0, f"❌ 金额格式错误：'{v}'"
+        else:
+            clean[k] = v
+    try:
+        async with async_session_factory() as session:
+            stmt = update(Transaction).where(
+                Transaction.id.in_(ids), Transaction.user_id == user_id
+            ).values(**clean)
+            result = await session.execute(stmt)
+            await session.commit()
+        return result.rowcount, ""
+    except Exception as e:
+        logger.exception(f"[execute_update] 批量修改失败: {e}")
+        return 0, "❌ 批量修改失败：数据库异常。"
+
+
+# ─── 工具 ─────────────────────────────────────────────────────────────────────
+
 @tool
 async def add_transaction(
     merchant: str,
@@ -22,7 +95,7 @@ async def add_transaction(
     transaction_date: str,
     category: str = "其他",
     description: str = "",
-    user_id: str = "default_user",
+    config: RunnableConfig = None,
 ) -> str:
     """添加一笔新的交易记录到数据库。
 
@@ -32,8 +105,8 @@ async def add_transaction(
         transaction_date: 交易日期，格式为 YYYY-MM-DD
         category: 分类，如"餐饮"、"购物"、"交通"、"娱乐"、"居住"、"其他"
         description: 补充描述（可选）
-        user_id: 用户ID（系统自动填充）
     """
+    user_id = _user_id(config)
     logger.info(f"[add_transaction] 开始记账 | 商户: {merchant} | 金额: {amount} | 日期: {transaction_date} | 分类: {category}")
 
     try:
@@ -74,23 +147,23 @@ async def add_transaction(
 
 @tool
 async def query_transactions(
-    user_id: str = "default_user",
     start_date: str = "",
     end_date: str = "",
     category: str = "",
     merchant: str = "",
     limit: int = 50,
+    config: RunnableConfig = None,
 ) -> str:
     """查询交易记录。支持按日期范围、分类、商户进行筛选。
 
     Args:
-        user_id: 用户ID（系统自动填充）
         start_date: 起始日期（含），格式 YYYY-MM-DD，为空则不限
         end_date: 结束日期（含），格式 YYYY-MM-DD，为空则不限
         category: 按分类筛选，如"餐饮"，为空则不限
         merchant: 按商户名称模糊搜索，为空则不限
         limit: 最多返回条数，默认50
     """
+    user_id = _user_id(config)
     logger.info(f"[query_transactions] 查询 | 日期: {start_date or '不限'}~{end_date or '不限'} | 分类: {category or '全部'} | 商户: {merchant or '全部'} | limit: {limit}")
 
     try:
@@ -161,24 +234,24 @@ async def query_transactions(
 @tool
 async def update_transaction(
     transaction_id: int,
-    user_id: str = "default_user",
     merchant: str = "",
     amount: float = 0.0,
     transaction_date: str = "",
     category: str = "",
     description: str = "",
+    config: RunnableConfig = None,
 ) -> str:
     """修改一笔已有的交易记录。修改前需要用户确认。
 
     Args:
         transaction_id: 要修改的交易记录ID
-        user_id: 用户ID（系统自动填充）
         merchant: 新的商户名称，留空表示不修改
         amount: 新的金额，0表示不修改
         transaction_date: 新的日期（YYYY-MM-DD），留空表示不修改
         category: 新的分类，留空表示不修改
         description: 新的描述，留空表示不修改
     """
+    user_id = _user_id(config)
     logger.info(f"[update_transaction] 修改交易 ID={transaction_id}")
 
     try:
@@ -215,43 +288,41 @@ async def update_transaction(
                 preview_lines.append(f"  {k}：{v}")
             preview = "\n".join(preview_lines)
 
-            # interrupt 暂停，等待用户确认
-            approved = interrupt({
-                "type": "update_preview",
-                "preview": preview,
-                "transaction_id": transaction_id,
-                "changes": changes,
-            })
-
-            if not approved:
-                return "❌ 用户拒绝了修改操作。"
-
-            # 用户批准，执行修改
+            # 构建结构化修改字段（interrupt 前完成，审批路径复用）
             update_values = {}
             if merchant:
                 update_values["merchant"] = merchant
             if amount != 0.0:
                 update_values["amount"] = Decimal(str(amount))
             if transaction_date:
-                try:
-                    update_values["transaction_date"] = date.fromisoformat(transaction_date)
-                except ValueError:
+                parsed = _parse_date(transaction_date)
+                if parsed is None:
                     return f"❌ 日期格式错误：'{transaction_date}'"
+                update_values["transaction_date"] = parsed
             if category:
                 update_values["category"] = category
             if description:
                 update_values["description"] = description
 
-            if update_values:
-                stmt = update(Transaction).where(
-                    Transaction.id == transaction_id,
-                    Transaction.user_id == user_id,
-                ).values(**update_values)
-                await session.execute(stmt)
-                await session.commit()
+            # interrupt 暂停，等待用户确认
+            approved = interrupt({
+                "type": "update_preview",
+                "preview": preview,
+                "transaction_id": transaction_id,
+                "changes": changes,
+                "fields": {k: str(v) for k, v in update_values.items()},
+            })
 
-            logger.info(f"[update_transaction] 修改成功 | ID={transaction_id}")
-            return f"✅ 交易 #{transaction_id} 修改成功！\n" + "\n".join(f"  {k}：{v}" for k, v in changes.items())
+            if not approved:
+                return "❌ 用户拒绝了修改操作。"
+
+        # 用户批准，执行修改（公共执行函数）
+        rowcount, err = await execute_update([transaction_id], update_values, user_id)
+        if err:
+            return err
+
+        logger.info(f"[update_transaction] 修改成功 | ID={transaction_id}")
+        return f"✅ 交易 #{transaction_id} 修改成功！\n" + "\n".join(f"  {k}：{v}" for k, v in changes.items())
 
     except GraphInterrupt:
         raise  # interrupt 必须向上传播，不能被 except Exception 吞掉
@@ -263,14 +334,14 @@ async def update_transaction(
 @tool
 async def delete_transaction(
     transaction_id: int,
-    user_id: str = "default_user",
+    config: RunnableConfig = None,
 ) -> str:
     """删除一笔交易记录。删除前会暂停并展示预览，等待用户确认。
 
     Args:
         transaction_id: 要删除的交易记录ID
-        user_id: 用户ID（系统自动填充）
     """
+    user_id = _user_id(config)
     logger.info(f"[delete_transaction] 删除交易 ID={transaction_id}")
 
     try:
@@ -305,16 +376,13 @@ async def delete_transaction(
             if not approved:
                 return "❌ 用户拒绝了删除操作。"
 
-            # 用户批准，执行删除
-            stmt = delete(Transaction).where(
-                Transaction.id == transaction_id,
-                Transaction.user_id == user_id,
-            )
-            await session.execute(stmt)
-            await session.commit()
+        # 用户批准，执行删除（公共执行函数）
+        rowcount, err = await execute_delete([transaction_id], user_id)
+        if err:
+            return err
 
-            logger.info(f"[delete_transaction] 删除成功 | ID={transaction_id}")
-            return f"✅ 交易 #{transaction_id} 已删除。"
+        logger.info(f"[delete_transaction] 删除成功 | ID={transaction_id}")
+        return f"✅ 交易 #{transaction_id} 已删除。"
 
     except GraphInterrupt:
         raise  # interrupt 必须向上传播，不能被 except Exception 吞掉
@@ -326,7 +394,7 @@ async def delete_transaction(
 @tool
 async def delete_transactions(
     transaction_ids: list[int],
-    user_id: str = "default_user",
+    config: RunnableConfig = None,
 ) -> str:
     """批量删除一笔或多笔交易记录。删除前会暂停并展示全部记录的明细预览，等待用户一次性确认。
 
@@ -335,8 +403,8 @@ async def delete_transactions(
 
     Args:
         transaction_ids: 要删除的交易记录ID列表（可传单个或多个）
-        user_id: 用户ID（系统自动填充）
     """
+    user_id = _user_id(config)
     logger.info(f"[delete_transactions] 批量删除 | IDs: {transaction_ids}")
 
     # 去重并保持顺序
@@ -387,18 +455,10 @@ async def delete_transactions(
     if not approved:
         return "❌ 用户拒绝了删除操作。"
 
-    # 用户批准，批量删除
-    try:
-        async with async_session_factory() as session:
-            stmt = delete(Transaction).where(
-                Transaction.id.in_(found_ids),
-                Transaction.user_id == user_id,
-            )
-            await session.execute(stmt)
-            await session.commit()
-    except Exception as e:
-        logger.exception(f"[delete_transactions] 批量删除失败: {e}")
-        return "❌ 批量删除失败：数据库异常。"
+    # 用户批准，批量删除（公共执行函数）
+    rowcount, err = await execute_delete(list(found_ids), user_id)
+    if err:
+        return err
 
     logger.info(f"[delete_transactions] 批量删除成功 | 数量: {len(found_ids)}")
     msg = f"✅ 已批量删除 {len(found_ids)} 笔交易记录。"
@@ -410,12 +470,12 @@ async def delete_transactions(
 @tool
 async def update_transactions(
     transaction_ids: list[int],
-    user_id: str = "default_user",
     merchant: str = "",
     amount: float = 0.0,
     transaction_date: str = "",
     category: str = "",
     description: str = "",
+    config: RunnableConfig = None,
 ) -> str:
     """批量修改一笔或多笔已有的交易记录（所有记录应用相同的修改字段）。修改前会暂停并展示全部变更预览，等待用户一次性确认。
 
@@ -424,13 +484,13 @@ async def update_transactions(
 
     Args:
         transaction_ids: 要修改的交易记录ID列表
-        user_id: 用户ID（系统自动填充）
         merchant: 新的商户名称，留空表示不修改
         amount: 新的金额，0表示不修改
         transaction_date: 新的日期（YYYY-MM-DD），留空表示不修改
         category: 新的分类，留空表示不修改
         description: 新的描述，留空表示不修改
     """
+    user_id = _user_id(config)
     logger.info(f"[update_transactions] 批量修改 | IDs: {transaction_ids} | amount={amount} | category={category}")
 
     try:
@@ -478,6 +538,22 @@ async def update_transactions(
     if not per_record_changes:
         return "⚠️ 这些记录与要修改的内容一致，无需修改。"
 
+    # 构建结构化修改字段（interrupt 前完成，审批路径复用）
+    update_values = {}
+    if merchant:
+        update_values["merchant"] = merchant
+    if amount != 0.0:
+        update_values["amount"] = Decimal(str(amount))
+    if transaction_date:
+        parsed = _parse_date(transaction_date)
+        if parsed is None:
+            return f"❌ 日期格式错误：'{transaction_date}'"
+        update_values["transaction_date"] = parsed
+    if category:
+        update_values["category"] = category
+    if description:
+        update_values["description"] = description
+
     lines = [f"📝 即将批量修改 {len(per_record_changes)} 笔交易记录："]
     for rid, changes in per_record_changes.items():
         lines.append(f"  #{rid}: " + "；".join(f"{k} {v}" for k, v in changes.items()))
@@ -492,38 +568,16 @@ async def update_transactions(
         "transaction_ids": list(per_record_changes.keys()),
         "changes": {str(k): v for k, v in per_record_changes.items()},
         "skipped_missing": missing,
+        "fields": {k: str(v) for k, v in update_values.items()},
     })
 
     if not approved:
         return "❌ 用户拒绝了修改操作。"
 
-    # 用户批准，批量修改（仅作用于有实际变更的记录）
-    update_values = {}
-    if merchant:
-        update_values["merchant"] = merchant
-    if amount != 0.0:
-        update_values["amount"] = Decimal(str(amount))
-    if transaction_date:
-        try:
-            update_values["transaction_date"] = date.fromisoformat(transaction_date)
-        except ValueError:
-            return f"❌ 日期格式错误：'{transaction_date}'"
-    if category:
-        update_values["category"] = category
-    if description:
-        update_values["description"] = description
-
-    try:
-        async with async_session_factory() as session:
-            stmt = update(Transaction).where(
-                Transaction.id.in_(list(per_record_changes.keys())),
-                Transaction.user_id == user_id,
-            ).values(**update_values)
-            await session.execute(stmt)
-            await session.commit()
-    except Exception as e:
-        logger.exception(f"[update_transactions] 批量修改失败: {e}")
-        return "❌ 批量修改失败：数据库异常。"
+    # 用户批准，批量修改（公共执行函数；仅作用于有实际变更的记录）
+    rowcount, err = await execute_update(list(per_record_changes.keys()), update_values, user_id)
+    if err:
+        return err
 
     logger.info(f"[update_transactions] 批量修改成功 | 数量: {len(per_record_changes)}")
     msg = f"✅ 已批量修改 {len(per_record_changes)} 笔交易记录。"

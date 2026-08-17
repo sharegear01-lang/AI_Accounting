@@ -267,29 +267,27 @@ async def agent_node(state: AgentState) -> dict:
 
 # ─── 工具执行节点 ─────────────────────────────────────────────────────────────
 
-async def tools_node(state: AgentState) -> dict:
-    """执行 LLM 请求的工具调用，并强制注入当前用户 ID
+async def tools_node(state: AgentState, config: RunnableConfig) -> dict:
+    """执行 LLM 请求的工具调用
 
-    安全说明：LLM 可能在 tool_calls 中携带任意 user_id（或猜测一个值），
-    这里一律用 JWT 鉴权得到的 current_user_id 覆盖，保证多租户数据隔离——
-    工具永远以"当前登录用户"的身份访问数据库，无法越权读/写他人数据。
+    安全说明：工具不再接收 user_id 参数——当前用户 ID 由 JWT 鉴权写入
+    config["configurable"]["user_id"]，经 LangChain 自动注入到工具的
+    config 参数中。LLM 看不到也无法伪造该字段，保证多租户数据隔离。
     """
     last_message = state["messages"][-1]
-    user_id = state.get("current_user_id", "default_user")
     tool_map = {t.name: t for t in ALL_TOOLS}
     results: list[ToolMessage] = []
 
     for tc in last_message.tool_calls:
         name = tc["name"]
         args = dict(tc.get("args", {}) or {})
-        args["user_id"] = user_id  # 覆盖模型可能传来的任意值
 
         tool = tool_map.get(name)
         if tool is None:
             content = f"❌ 未知工具: {name}"
         else:
             try:
-                content = str(await tool.ainvoke(args))
+                content = str(await tool.ainvoke(args, config=config))
             except GraphInterrupt:
                 raise  # interrupt 必须向上传播，不能被吞掉
             except Exception as e:

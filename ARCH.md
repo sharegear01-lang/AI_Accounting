@@ -63,9 +63,19 @@ respond_blocked -> END
 
 ### HITL 人工复核（修改/删除）
 
-- update/delete 工具内 `interrupt()` 暂停（无需独立节点），预览含完整明细。
-- 审批恢复由 API 层 `_resume_graph` 手动执行 + `aupdate_state` 修补 checkpoint
-  （当前实现，待迁移 `Command(resume)`，见 PROJECT_STATE 决策记录）。
+- update/delete 工具内 `interrupt()` 暂停（无需独立节点），预览含完整明细，
+  interrupt payload 携带与预览一致的结构化数据（transaction_ids / fields）。
+- 审批恢复由 API 层 `_resume_graph` 从 checkpoint 读取 interrupt payload，
+  调用公共执行函数 `execute_delete` / `execute_update` 后 `aupdate_state` 修补。
+  **不迁移 `Command(resume)`**：LangGraph 1.2.9 的 resume 语义为重放整个
+  tools 节点，已完成工具会被重复执行（官方已知缺陷，PR #3126 修复未合并），
+  手动执行路径可精确控制（见 PROJECT_STATE 决策记录）。
+
+### 多租户隔离
+
+- 工具**不暴露 user_id 参数**：当前用户 ID 由 JWT 鉴权写入
+  `config["configurable"]["user_id"]`，经 LangChain 自动注入工具 config 参数，
+  LLM 看不到也无法伪造，从根源杜绝跨用户越权。
 
 ## 4. OCR 标准化处理流程
 
