@@ -33,6 +33,7 @@ Thumbs.db
 *.png
 graph.png
 logs/
+.langgraph_api/   # LangGraph CLI 运行时检查点（.pckl）
 
 # ===== 测试/临时 =====
 test_*.py
@@ -42,3 +43,4 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/*.local
+frontend/certs/   # 本地 HTTPS 证书/私钥（scripts/https-setup.ps1 生成，绝不入库）

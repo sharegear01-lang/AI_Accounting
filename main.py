@@ -7,6 +7,14 @@ import asyncio
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+# 尽早把 .env 载入 os.environ。
+# LangSmith SDK 只从环境变量读取追踪配置（LANGSMITH_TRACING / API_KEY / PROJECT /
+# ENDPOINT）。pydantic-settings 解析 .env 只是填充 Settings 对象，不会写入 os.environ，
+# 因此不主动 load_dotenv 的话，即使 .env 里 LANGSMITH_TRACING=true 也不会产生任何追踪。
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -28,8 +36,9 @@ async def lifespan(app: FastAPI):
     logger.info("数据库表初始化完成")
     await init_checkpointer()
     yield
-    await close_checkpointer()
     logger.info("应用关闭")
+    await close_checkpointer()
+
 
 
 app = FastAPI(

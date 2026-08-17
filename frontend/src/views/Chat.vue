@@ -71,7 +71,7 @@
           <img :src="pendingImage" alt="待发送图片" />
           <el-icon class="remove-icon" @click="clearImage"><CircleCloseFilled /></el-icon>
         </div>
-        <span class="preview-tip">将随消息一起发送，自动压缩至 512px</span>
+        <span class="preview-tip">将随消息一起发送，自动压缩至 1280px</span>
       </div>
 
       <div class="input-area">
@@ -164,14 +164,14 @@ function addMessage(msg) {
   scrollToBottom()
 }
 
-// ─── 图片处理：前端压缩至 512px / 200KB ───
+// ─── 图片处理：长边归一化至 1280px（OCR 准确率与延迟的平衡点）───
 function handleImageSelect(file) {
   const reader = new FileReader()
   reader.onload = (e) => {
     const img = new Image()
     img.onload = () => {
-      // 压缩：长边归一化至 512px
-      const MAX = 512
+      // 长边上限：低于此值保持原尺寸，避免不必要的重编码
+      const MAX = 1280
       let { width, height } = img
       if (width > MAX || height > MAX) {
         const ratio = Math.min(MAX / width, MAX / height)
@@ -183,8 +183,8 @@ function handleImageSelect(file) {
       canvas.height = height
       const ctx = canvas.getContext('2d')
       ctx.drawImage(img, 0, 0, width, height)
-      // 压缩质量（JPEG 质量 0.7，控制体积）
-      pendingImage.value = canvas.toDataURL('image/jpeg', 0.7)
+      // JPEG 质量 0.85：清晰度优先，体积不是延迟瓶颈
+      pendingImage.value = canvas.toDataURL('image/jpeg', 0.85)
       ElMessage.success('图片已就绪，可随消息发送')
     }
     img.src = e.target.result

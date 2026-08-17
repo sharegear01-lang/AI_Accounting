@@ -17,7 +17,8 @@ AI 会计助手（AIAcct）是一款面向个人 / 家庭的 AI 财务记账助�
 - **📝 文本记账**：输入"昨天下午在星巴克花了45元买咖啡"，AI 自动提取并入库。
 - **📷 图片记账**：上传电商订单截图，后端调用 Qwen3-OCR 识别文字，自动补全记账信息。
 - **🔍 自然语言查询**：如"上个月吃饭花了多少钱"、"显示我本月所有的网购记录"。
-- **🛡️ 人工复核 (HITL)**：修改 / 删除记账信息时，Agent 暂停执行，前端弹出确认卡片，批准后才真正操作数据库。
+- **🛡️ 人工复核 (HITL)**：修改 / 删除记账信息时，Agent 暂停执行，前端弹出确认卡片，批准后才真正操作数据库。支持**批量修改 / 批量删除**：多条记录一次性展示完整明细、只确认一次。
+- **🔒 本地 HTTPS**：提供一键脚本生成受信任的本地证书，消除浏览器对密码输入框的“不安全连接”警告。
 - **👤 JWT 鉴权**：注册 / 登录 + Bearer Token，所有数据严格按 `user_id` 隔离。
 - **🧠 会话记忆**：基于 PostgreSQL Checkpointer 的 `thread_id` 会话隔离，多轮对话上下文不丢失。
 - **🎨 现代前端**：Vue 3 + Element Plus，Markdown 渲染 + 图片前端压缩。
@@ -93,7 +94,19 @@ npm install
 npm run dev
 ```
 
-前端运行于 `http://127.0.0.1:5173`，Vite 已将 `/api` 代理至后端 8000 端口。
+前端运行于 `https://localhost:5173`（推荐）或 `http://localhost:5173`，Vite 已将 `/api` 代理至后端 8000 端口。
+
+#### 启用 HTTPS（消除浏览器密码警告）
+
+浏览器对非 HTTPS 页面上的密码输入框会提示“不安全连接 / 密码泄露”。项目内置一键脚本（基于 openssl，无需安装额外工具）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\https-setup.ps1
+cd frontend
+npm run dev   # 自动检测证书并以 HTTPS 启动
+```
+
+脚本会生成 `frontend/certs/` 下的本地 CA 与证书（覆盖 `localhost` / `127.0.0.1` / `::1`），并把 CA 装入 Windows 受信任根存储（当前用户，无需管理员）。之后请通过 `https://localhost:5173` 访问。未生成证书时，dev server 自动回退为 HTTP，不影响开发。
 
 ## API 一览
 

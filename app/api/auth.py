@@ -35,10 +35,18 @@ async def register(request: RegisterRequest):
 
         # 创建新用户
         user_id = str(uuid.uuid4())
+        try:
+            hashed = hash_password(request.password)
+        except Exception as e:
+            logger.error(f"[/register] 密码哈希失败: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="密码不符合要求，请使用 6-50 个字符的密码",
+            )
         user = User(
             id=user_id,
             username=request.username,
-            hashed_password=hash_password(request.password),
+            hashed_password=hashed,
         )
         session.add(user)
         await session.commit()

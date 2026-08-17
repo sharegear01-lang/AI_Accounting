@@ -194,21 +194,21 @@ async def update_transaction(
             if not txn:
                 return f"❌ 未找到ID为 {transaction_id} 的交易记录。"
 
-            # 构造变更预览
+            # 构造变更预览（跳过与当前值相同的字段，避免"无变化修改"触发多余确认）
             changes = {}
-            if merchant:
+            if merchant and merchant != txn.merchant:
                 changes["商户"] = f"{txn.merchant} → {merchant}"
-            if amount != 0.0:
+            if amount != 0.0 and Decimal(str(amount)) != txn.amount:
                 changes["金额"] = f"¥{float(txn.amount):.2f} → ¥{amount:.2f}"
-            if transaction_date:
+            if transaction_date and transaction_date != txn.transaction_date.isoformat():
                 changes["日期"] = f"{txn.transaction_date.isoformat()} → {transaction_date}"
-            if category:
+            if category and category != txn.category:
                 changes["分类"] = f"{txn.category} → {category}"
-            if description:
+            if description and description != (txn.description or ""):
                 changes["描述"] = f"{txn.description or '无'} → {description}"
 
             if not changes:
-                return "⚠️ 没有提供任何修改字段。"
+                return "⚠️ 该记录与要修改的内容一致，无需修改。"
 
             preview_lines = [f"📝 修改交易 #{transaction_id}："]
             for k, v in changes.items():
@@ -321,3 +321,212 @@ async def delete_transaction(
     except Exception as e:
         logger.exception(f"[delete_transaction] 删除失败: {e}")
         return f"❌ 删除失败：{str(e)}"
+
+
+@tool
+async def delete_transactions(
+    transaction_ids: list[int],
+    user_id: str = "default_user",
+) -> str:
+    """批量删除一笔或多笔交易记录。删除前会暂停并展示全部记录的明细预览，等待用户一次性确认。
+
+    用户要求删除多条记录时，必须用本工具（一次性传入所有 ID，只确认一次），
+    禁止为每条记录分别调用 delete_transaction。
+
+    Args:
+        transaction_ids: 要删除的交易记录ID列表（可传单个或多个）
+        user_id: 用户ID（系统自动填充）
+    """
+    logger.info(f"[delete_transactions] 批量删除 | IDs: {transaction_ids}")
+
+    # 去重并保持顺序
+    try:
+        ids = list(dict.fromkeys(int(i) for i in transaction_ids))
+    except (TypeError, ValueError):
+        return "❌ transaction_ids 必须是整数 ID 列表。"
+    if not ids:
+        return "❌ 未提供任何交易记录ID。"
+
+    try:
+        async with async_session_factory() as session:
+            stmt = select(Transaction).where(
+                Transaction.id.in_(ids),
+                Transaction.user_id == user_id,
+            )
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+    except Exception as e:
+        logger.exception(f"[delete_transactions] 查询失败: {e}")
+        return "❌ 批量删除失败：数据库异常。"
+
+    if not records:
+        return "❌ 未找到任何匹配的交易记录。"
+
+    found_ids = {r.id for r in records}
+    missing = [i for i in ids if i not in found_ids]
+
+    # 构造完整明细预览（一次性展示全部，避免多条记录逐条确认）
+    lines = [f"🗑️ 即将删除 {len(records)} 笔交易记录："]
+    for r in records:
+        lines.append(
+            f"  #{r.id} | {r.transaction_date.isoformat()} | {r.merchant} "
+            f"| ¥{float(r.amount):.2f} | {r.category} | {(r.description or '无')[:20]}"
+        )
+    if missing:
+        lines.append(f"  ⚠️ 以下 ID 不存在，将跳过: {missing}")
+    preview = "\n".join(lines)
+
+    # interrupt 一次，等待用户一次性确认
+    approved = interrupt({
+        "type": "delete_preview",
+        "preview": preview,
+        "transaction_ids": ids,
+        "skipped_missing": missing,
+    })
+
+    if not approved:
+        return "❌ 用户拒绝了删除操作。"
+
+    # 用户批准，批量删除
+    try:
+        async with async_session_factory() as session:
+            stmt = delete(Transaction).where(
+                Transaction.id.in_(found_ids),
+                Transaction.user_id == user_id,
+            )
+            await session.execute(stmt)
+            await session.commit()
+    except Exception as e:
+        logger.exception(f"[delete_transactions] 批量删除失败: {e}")
+        return "❌ 批量删除失败：数据库异常。"
+
+    logger.info(f"[delete_transactions] 批量删除成功 | 数量: {len(found_ids)}")
+    msg = f"✅ 已批量删除 {len(found_ids)} 笔交易记录。"
+    if missing:
+        msg += f"\n⚠️ 未找到并跳过的 ID: {missing}"
+    return msg
+
+
+@tool
+async def update_transactions(
+    transaction_ids: list[int],
+    user_id: str = "default_user",
+    merchant: str = "",
+    amount: float = 0.0,
+    transaction_date: str = "",
+    category: str = "",
+    description: str = "",
+) -> str:
+    """批量修改一笔或多笔已有的交易记录（所有记录应用相同的修改字段）。修改前会暂停并展示全部变更预览，等待用户一次性确认。
+
+    用户要求批量修改多条记录时，必须用本工具（一次性传入所有 ID，只确认一次），
+    禁止为每条记录分别调用 update_transaction。
+
+    Args:
+        transaction_ids: 要修改的交易记录ID列表
+        user_id: 用户ID（系统自动填充）
+        merchant: 新的商户名称，留空表示不修改
+        amount: 新的金额，0表示不修改
+        transaction_date: 新的日期（YYYY-MM-DD），留空表示不修改
+        category: 新的分类，留空表示不修改
+        description: 新的描述，留空表示不修改
+    """
+    logger.info(f"[update_transactions] 批量修改 | IDs: {transaction_ids} | amount={amount} | category={category}")
+
+    try:
+        ids = list(dict.fromkeys(int(i) for i in transaction_ids))
+    except (TypeError, ValueError):
+        return "❌ transaction_ids 必须是整数 ID 列表。"
+    if not ids:
+        return "❌ 未提供任何交易记录ID。"
+
+    try:
+        async with async_session_factory() as session:
+            stmt = select(Transaction).where(
+                Transaction.id.in_(ids),
+                Transaction.user_id == user_id,
+            )
+            result = await session.execute(stmt)
+            records = result.scalars().all()
+    except Exception as e:
+        logger.exception(f"[update_transactions] 查询失败: {e}")
+        return "❌ 批量修改失败：数据库异常。"
+
+    if not records:
+        return "❌ 未找到任何匹配的交易记录。"
+
+    found_ids = {r.id for r in records}
+    missing = [i for i in ids if i not in found_ids]
+
+    # 逐条构造变更预览（跳过与当前值相同的字段，避免"无变化修改"触发多余确认）
+    per_record_changes: dict[int, dict] = {}
+    for r in records:
+        changes: dict[str, str] = {}
+        if merchant and merchant != r.merchant:
+            changes["商户"] = f"{r.merchant} → {merchant}"
+        if amount != 0.0 and Decimal(str(amount)) != r.amount:
+            changes["金额"] = f"¥{float(r.amount):.2f} → ¥{amount:.2f}"
+        if transaction_date and transaction_date != r.transaction_date.isoformat():
+            changes["日期"] = f"{r.transaction_date.isoformat()} → {transaction_date}"
+        if category and category != r.category:
+            changes["分类"] = f"{r.category} → {category}"
+        if description and description != (r.description or ""):
+            changes["描述"] = f"{r.description or '无'} → {description}"
+        if changes:
+            per_record_changes[r.id] = changes
+
+    if not per_record_changes:
+        return "⚠️ 这些记录与要修改的内容一致，无需修改。"
+
+    lines = [f"📝 即将批量修改 {len(per_record_changes)} 笔交易记录："]
+    for rid, changes in per_record_changes.items():
+        lines.append(f"  #{rid}: " + "；".join(f"{k} {v}" for k, v in changes.items()))
+    if missing:
+        lines.append(f"  ⚠️ 以下 ID 不存在，将跳过: {missing}")
+    preview = "\n".join(lines)
+
+    # interrupt 一次，等待用户一次性确认
+    approved = interrupt({
+        "type": "update_preview",
+        "preview": preview,
+        "transaction_ids": list(per_record_changes.keys()),
+        "changes": {str(k): v for k, v in per_record_changes.items()},
+        "skipped_missing": missing,
+    })
+
+    if not approved:
+        return "❌ 用户拒绝了修改操作。"
+
+    # 用户批准，批量修改（仅作用于有实际变更的记录）
+    update_values = {}
+    if merchant:
+        update_values["merchant"] = merchant
+    if amount != 0.0:
+        update_values["amount"] = Decimal(str(amount))
+    if transaction_date:
+        try:
+            update_values["transaction_date"] = date.fromisoformat(transaction_date)
+        except ValueError:
+            return f"❌ 日期格式错误：'{transaction_date}'"
+    if category:
+        update_values["category"] = category
+    if description:
+        update_values["description"] = description
+
+    try:
+        async with async_session_factory() as session:
+            stmt = update(Transaction).where(
+                Transaction.id.in_(list(per_record_changes.keys())),
+                Transaction.user_id == user_id,
+            ).values(**update_values)
+            await session.execute(stmt)
+            await session.commit()
+    except Exception as e:
+        logger.exception(f"[update_transactions] 批量修改失败: {e}")
+        return "❌ 批量修改失败：数据库异常。"
+
+    logger.info(f"[update_transactions] 批量修改成功 | 数量: {len(per_record_changes)}")
+    msg = f"✅ 已批量修改 {len(per_record_changes)} 笔交易记录。"
+    if missing:
+        msg += f"\n⚠️ 未找到并跳过的 ID: {missing}"
+    return msg

@@ -10,9 +10,10 @@ from langgraph.errors import GraphInterrupt
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.agent.graph import compile_graph
 from app.checkpointer import get_checkpointer
-from app.services.ocr_service import recognize_image
+from app.services.ocr_service import recognize_structured
 from app.auth.dependencies import get_current_user
 from app.models.user import User
+from app.config import settings
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,8 +21,19 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["chat"])
 
 
-async def _execute_pending_tool(tool_name: str, tool_args: dict, approved: bool) -> str:
-    """手动执行待确认的工具操作
+def _thread_config(user_id: str, thread_id: str) -> dict:
+    """按用户命名空间隔离会话线程，防止跨用户访问对话记忆
+
+    checkpointer 以 thread_id 为 key，若不含用户维度，A 用户复用 B 的
+    thread_id 即可读到/续接 B 的对话。这里统一加用户前缀命名空间。
+    """
+    return {"configurable": {"thread_id": f"{user_id}:{thread_id}"}}
+
+
+async def _execute_pending_tool(
+    tool_name: str, tool_args: dict, approved: bool, user_id: str
+) -> str:
+    """手动执行待确认的工具操作（单个或批量）
 
     直接操作数据库，绕过 interrupt 机制。
     """
@@ -37,23 +49,30 @@ async def _execute_pending_tool(tool_name: str, tool_args: dict, approved: bool)
     if not approved:
         return "❌ 用户拒绝了此操作。"
 
-    if tool_name == "delete_transaction":
+    # 解析目标 ID 列表（兼容单个与批量工具）
+    if tool_name in ("delete_transaction", "update_transaction"):
+        ids = [int(tool_args.get("transaction_id"))] if tool_args.get("transaction_id") else []
+    else:
+        ids = [int(i) for i in (tool_args.get("transaction_ids") or [])]
+    ids = list(dict.fromkeys(ids))
+
+    if not ids:
+        return "❌ 未提供交易记录ID。"
+
+    if tool_name in ("delete_transaction", "delete_transactions"):
         # 直接执行删除（不再走 interrupt）
-        tid = tool_args.get("transaction_id")
-        uid = tool_args.get("user_id", "default_user")
         async with async_session_factory() as session:
             stmt = sql_delete(Transaction).where(
-                Transaction.id == tid, Transaction.user_id == uid
+                Transaction.id.in_(ids), Transaction.user_id == user_id
             )
-            await session.execute(stmt)
+            result = await session.execute(stmt)
             await session.commit()
-        return f"✅ 交易 #{tid} 已删除。"
+        if result.rowcount == 0:
+            return "❌ 未找到匹配的交易记录。"
+        return f"✅ 已删除 {result.rowcount} 笔交易记录。"
 
-    elif tool_name == "update_transaction":
+    elif tool_name in ("update_transaction", "update_transactions"):
         # 直接执行修改（不再走 interrupt）
-        tid = tool_args.get("transaction_id")
-        uid = tool_args.get("user_id", "default_user")
-
         update_values = {}
         if tool_args.get("merchant"):
             update_values["merchant"] = tool_args["merchant"]
@@ -74,16 +93,16 @@ async def _execute_pending_tool(tool_name: str, tool_args: dict, approved: bool)
 
         async with async_session_factory() as session:
             stmt = sql_update(Transaction).where(
-                Transaction.id == tid, Transaction.user_id == uid
+                Transaction.id.in_(ids), Transaction.user_id == user_id
             ).values(**update_values)
             result = await session.execute(stmt)
             await session.commit()
 
         if result.rowcount == 0:
-            return f"❌ 未找到ID为 {tid} 的交易记录。"
+            return "❌ 未找到匹配的交易记录。"
 
         changed = "、".join(f"{k}={v}" for k, v in update_values.items())
-        return f"✅ 交易 #{tid} 修改成功（{changed}）。"
+        return f"✅ 已修改 {result.rowcount} 笔交易记录（{changed}）。"
 
     return f"❌ 未知工具: {tool_name}"
 
@@ -100,7 +119,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 
     try:
         # 检查是否是确认/取消回复（恢复被 interrupt 暂停的图）
-        config = {"configurable": {"thread_id": request.thread_id}}
+        config = _thread_config(current_user.id, request.thread_id)
         checkpointer = get_checkpointer()
         agent_app = compile_graph(checkpointer=checkpointer)
 
@@ -110,10 +129,10 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 
         if is_pending and request.message.strip() in ("确认", "确认。", "好的", "批准", "同意", "ok", "OK"):
             logger.info(f"[/chat] 用户确认操作，恢复图执行 | thread={request.thread_id}")
-            return await _resume_graph(request.thread_id, approved=True)
+            return await _resume_graph(request.thread_id, approved=True, user_id=current_user.id)
         elif is_pending and request.message.strip() in ("取消", "取消。", "拒绝", "不", "算了"):
             logger.info(f"[/chat] 用户拒绝操作，恢复图执行 | thread={request.thread_id}")
-            return await _resume_graph(request.thread_id, approved=False)
+            return await _resume_graph(request.thread_id, approved=False, user_id=current_user.id)
 
         # 构造用户消息
         user_content = request.message
@@ -121,15 +140,47 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         # 如果有图片，先 OCR
         if request.image_base64:
             logger.info("[/chat] 检测到图片，开始 OCR 识别...")
-            image_bytes = base64.b64decode(request.image_base64)
-            ocr_text = await recognize_image(image_bytes)
-            logger.info(f"[/chat] OCR 完成 | 识别文字长度: {len(ocr_text)}")
-            logger.debug(f"[/chat] OCR 结果: {ocr_text[:200]}")
+            # 先做粗略长度预检，避免超大 base64 直接解码占用内存
+            if len(request.image_base64) > settings.MAX_UPLOAD_BYTES * 4 // 3 + 8:
+                raise HTTPException(status_code=400, detail="图片过大，请压缩后重新上传")
+            try:
+                image_bytes = base64.b64decode(request.image_base64, validate=True)
+            except Exception:
+                raise HTTPException(status_code=400, detail="图片数据格式错误，请重新上传")
+
+            # OCR 识别 + 结构化解析（文本框数组模式会自动重试）
+            ocr, raw_ocr = await recognize_structured(image_bytes)
+            logger.info(f"[/chat] OCR 完成 | recognized={ocr.recognized} | amount={ocr.amount} | unclear={ocr.unclear_fields}")
+
+            # ─── 防幻觉闸门：无法可靠识别就拦截，绝不让 agent 猜金额记账 ───
+            if not ocr.recognized:
+                reason = ocr.reason or "未识别到可读的文字"
+                logger.warning(f"[/chat] OCR 未识别到有效内容，拦截 | reason={reason} | 原始输出: {raw_ocr[:200]}")
+                return ChatResponse(
+                    reply=(
+                        f"❌ 无法从这张图片中识别到有效的交易信息（{reason}）。\n\n"
+                        "建议：重新拍摄，保证单据正对镜头、光线充足、文字清晰；"
+                        "也可以直接手动输入交易信息。"
+                    ),
+                    thread_id=request.thread_id,
+                )
+            if not ocr.is_bookable():
+                logger.warning(f"[/chat] OCR 金额缺失或无效，拦截记账 | 原始输出: {raw_ocr[:200]}")
+                return ChatResponse(
+                    reply=(
+                        "❌ 图片中的**金额**无法被可靠识别（模糊、缺失或格式异常）。"
+                        "为避免记错账，已取消本次自动记账。\n\n"
+                        "请重新拍摄金额区域清晰的图片，或直接手动输入交易信息。"
+                    ),
+                    thread_id=request.thread_id,
+                )
+
             user_content = (
-                f"[以下是用户上传的订单截图经 OCR 识别出的文字内容]\n"
-                f"{ocr_text}\n\n"
+                f"{ocr.to_agent_text()}\n\n"
                 f"[用户说]：{request.message}\n"
-                f"请根据以上 OCR 文字提取交易信息（商户、金额、日期、分类），完成记账。"
+                f"请根据以上 OCR 识别结果新增一笔交易记录（调用 add_transaction）。\n"
+                f"金额以 OCR 识别结果为准（{ocr.amount}），不可改、不可四舍五入、不可猜测；"
+                f"若置信度提示中列出未识别字段，先向用户确认后再记账，不得臆测。"
             )
 
         # 调用 Agent
@@ -184,13 +235,13 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
         raise HTTPException(status_code=500, detail=f"服务器内部错误：{str(e)}")
 
 
-async def _resume_graph(thread_id: str, approved: bool) -> ChatResponse:
-    """处理 interrupt 暂停后的审批
+async def _resume_graph(thread_id: str, approved: bool, user_id: str) -> ChatResponse:
+    """处理 interrupt 暂停后的审批（单个或批量）
 
     不使用 Command(resume=...)（LangGraph resume 行为不稳定），
     而是手动执行/跳过待确认操作，修补 checkpoint，再让 agent 生成回复。
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    config = _thread_config(user_id, thread_id)
     checkpointer = get_checkpointer()
     agent_app = compile_graph(checkpointer=checkpointer)
 
@@ -198,38 +249,47 @@ async def _resume_graph(thread_id: str, approved: bool) -> ChatResponse:
     state = await agent_app.aget_state(config)
     messages = state.values.get("messages", []) if state and state.values else []
 
-    pending_tool_call = None
-    pending_tool_name = None
-    pending_tool_args = {}
-
-    # 从后往前找最后一条带 tool_calls 的 AI 消息
+    # 从后往前找最后一条带 tool_calls 的 AI 消息，取出其全部待确认调用
+    pending_calls = []
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.tool_calls:
-            pending_tool_call = msg.tool_calls[0]  # 取第一个待确认的
-            pending_tool_name = pending_tool_call["name"]
-            pending_tool_args = pending_tool_call.get("args", {})
+            pending_calls = msg.tool_calls
             break
 
-    if not pending_tool_call:
+    if not pending_calls:
         logger.warning(f"[/resume] 未找到待确认的 tool_call")
         return ChatResponse(reply="⚠️ 没有找到待确认的操作。", thread_id=thread_id)
 
-    tool_call_id = pending_tool_call["id"]
-    logger.info(f"[/resume] 待确认操作: {pending_tool_name}({pending_tool_args}) | approved={approved}")
+    # 跳过已执行的调用（tools_node 在 interrupt 前已完成的部分，如同一消息里的 add_transaction），
+    # 避免重复执行造成重复记账
+    executed_ids = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
 
-    # 2. 手动执行或跳过工具
-    tool_result = await _execute_pending_tool(pending_tool_name, pending_tool_args, approved)
-    logger.info(f"[/resume] 工具执行结果: {tool_result[:100]}")
+    results: list[tuple[str, str]] = []
+    for tc in pending_calls:
+        tool_call_id = tc["id"]
+        if tool_call_id in executed_ids:
+            logger.info(f"[/resume] 跳过已执行的 tool_call: {tc['name']}({tool_call_id})")
+            continue
+        tool_name = tc["name"]
+        tool_args = tc.get("args", {}) or {}
+        logger.info(f"[/resume] 待确认操作: {tool_name}({tool_args}) | approved={approved}")
+        tool_result = await _execute_pending_tool(tool_name, tool_args, approved, user_id)
+        logger.info(f"[/resume] 工具执行结果: {tool_result[:100]}")
+        results.append((tool_call_id, tool_result))
 
-    # 3. 通过 aupdate_state 注入 ToolMessage，修补 checkpoint
+    if not results:
+        return ChatResponse(reply="⚠️ 所有待确认的操作都已被处理。", thread_id=thread_id)
+
+    # 3. 通过 aupdate_state 注入所有 ToolMessage，修补 checkpoint
     await agent_app.aupdate_state(
         config,
-        {"messages": [ToolMessage(content=tool_result, tool_call_id=tool_call_id)]},
+        {"messages": [ToolMessage(content=res, tool_call_id=tid) for tid, res in results]},
     )
-    logger.info(f"[/resume] checkpoint 已修补，tool_call_id={tool_call_id}")
+    logger.info(f"[/resume] checkpoint 已修补，tool_call_ids={[tid for tid, _ in results]}")
 
     # 直接返回工具结果（agent 下次用户消息时会自动生成总结回复）
-    return ChatResponse(reply=tool_result, thread_id=thread_id)
+    reply = "\n\n".join(res for _, res in results)
+    return ChatResponse(reply=reply, thread_id=thread_id)
 
 
 async def _handle_interrupt(agent_app, config, thread_id, preview, start_time) -> ChatResponse:
@@ -253,10 +313,10 @@ async def approve(thread_id: str, current_user: User = Depends(get_current_user)
     """批准被暂停的操作（修改/删除交易）"""
     logger.info(f"[/approve] 用户 {current_user.username} 批准操作 | thread={thread_id}")
     try:
-        return await _resume_graph(thread_id, approved=True)
+        return await _resume_graph(thread_id, approved=True, user_id=current_user.id)
     except GraphInterrupt:
         # 可能还有下一个 interrupt（连续多个修改操作）
-        return await _resume_graph(thread_id, approved=True)
+        return await _resume_graph(thread_id, approved=True, user_id=current_user.id)
     except Exception as e:
         logger.exception(f"[/approve] 异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -267,7 +327,7 @@ async def reject(thread_id: str, current_user: User = Depends(get_current_user))
     """拒绝被暂停的操作（修改/删除交易）"""
     logger.info(f"[/reject] 用户 {current_user.username} 拒绝操作 | thread={thread_id}")
     try:
-        return await _resume_graph(thread_id, approved=False)
+        return await _resume_graph(thread_id, approved=False, user_id=current_user.id)
     except Exception as e:
         logger.exception(f"[/reject] 异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -21,7 +21,10 @@ python-dotenv>=1.2.0
 
 # 鉴权
 PyJWT>=2.8.0
-bcrypt>=4.0.0
+# 鉴权
+# bcrypt>=4.x 对 >72 字节密码直接抛 ValueError，代码中已用 SHA-256 预哈希规避；
+# 锁 <6 防止未来大版本行为漂移（预哈希方案对任何 bcrypt 版本均兼容）
+bcrypt>=4.0.0,<6.0
 
 # OCR & 图片
 dashscope>=1.25.0
