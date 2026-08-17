@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     MAX_UPLOAD_BYTES: int = 10 * 1024 * 1024  # 上传图片原始大小上限（防滥用）
     OCR_TIMEOUT_SECONDS: int = 5
 
+    # 对话历史窗口（短期记忆定位）
+    # 记账助手是任务型应用：逐轮消息基本独立，历史价值集中在最近几轮
+    # （引用刚记的账、OCR 追问、HITL 上下文）。更早消息只增成本与噪音。
+    # 传 LLM 前裁剪（checkpoint 保留完整历史供审计/调试）；按需调整。
+    MAX_HISTORY_MESSAGES: int = 10
+
     # LangSmith
     LANGSMITH_TRACING: bool = False
     LANGSMITH_ENDPOINT: str = "https://api.smith.LangChain.com"

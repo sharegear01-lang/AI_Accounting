@@ -194,11 +194,36 @@ def _last_user_message_wants_modify_delete(messages) -> bool:
     return False
 
 
+def _trim_history(messages: list) -> list:
+    """滑动窗口裁剪：保留最近 N 条消息，向前对齐到 HumanMessage 起点
+
+    记账助手是任务型应用，只需短期记忆（最近几轮）；更早的消息只增
+    成本与噪音。对齐原因：工具调用对（AIMessage.tool_calls ↔ ToolMessage）
+    必须成对出现，从中间切开会产生孤儿 tool_call，被孤儿修补逻辑误补
+    为"⏸️ 已暂停"误导 LLM——因此宁可略超几条，绝不切开工具链。
+    """
+    limit = settings.MAX_HISTORY_MESSAGES
+    if len(messages) <= limit:
+        return messages
+    window = messages[-limit:]
+    # 从窗口起点向后找第一条 HumanMessage，作为完整轮次的起点
+    for i, msg in enumerate(window):
+        if isinstance(msg, HumanMessage):
+            return window[i:]
+    return window  # 兜底：窗口内无 HumanMessage（理论不出现）
+
+
 async def agent_node(state: AgentState) -> dict:
     """Agent 推理节点：调用 LLM 进行决策"""
     from datetime import date
 
-    messages = state["messages"]
+    raw_messages = state["messages"]
+    messages = _trim_history(raw_messages)
+    if len(messages) < len(raw_messages):
+        logger.info(
+            f"[Agent] 历史裁剪: {len(raw_messages)} → {len(messages)} 条"
+            f"（保留最近 {settings.MAX_HISTORY_MESSAGES} 条并轮次对齐）"
+        )
     logger.debug(f"[Agent] 输入消息数: {len(messages)} | 最后一条: {str(messages[-1].content)[:100]}")
 
     # 确保 system prompt 存在且包含最新日期
