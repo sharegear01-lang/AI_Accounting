@@ -1,16 +1,20 @@
 """LangGraph 节点实现"""
 
+import base64
 import re
 import time
 
-from langchain_core.messages import SystemMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, AIMessage, ToolMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_deepseek import ChatDeepSeek
 from langgraph.errors import GraphInterrupt
+from openai import OpenAIError
 
 from app.config import settings
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS
 from app.logger import get_logger
+from app.services.ocr_service import recognize_structured
 
 logger = get_logger(__name__)
 
@@ -62,6 +66,109 @@ def _get_llm(thinking=False, tool_choice=None):
     if tool_choice:
         return llm.bind_tools(ALL_TOOLS, tool_choice=tool_choice)
     return llm.bind_tools(ALL_TOOLS)
+
+
+# ─── 预处理节点（OCR + 防幻觉闸门）──────────────────────────────────────────
+
+async def preprocess_node(state: AgentState, config: RunnableConfig) -> dict:
+    """预处理节点：把用户输入转成 HumanMessage；有图片时先 OCR 并过防幻觉闸门
+
+    - 无图片：直接透传用户文本。
+    - 有图片：从 config["configurable"]["image_base64"] 读取（图片**不经过 state**，
+      避免 checkpointer 持久化图片字节——隐私 + 体积），解码 → recognize_structured
+      → 防幻觉闸门：
+      - 解码失败 / OCR 失败 / 识别失败 / 金额不可信 → 写入 ocr_block，
+        由路由 should_block 转到 respond_blocked_node 拦截，绝不进入 agent
+        （防止 LLM 猜测金额记账）。
+      - 识别成功 → 生成含 OCR 上下文的 HumanMessage。
+
+    返回前清空 user_input / ocr_block，原始输入不进 checkpoint（会话记忆只
+    保存处理后的消息）。
+    """
+    user_input = state.get("user_input", "")
+    image_b64 = (config.get("configurable") or {}).get("image_base64") if config else None
+
+    if not image_b64:
+        return {
+            "messages": [HumanMessage(content=user_input)],
+            "user_input": None,
+        }
+
+    logger.info("[Preprocess] 检测到图片，开始 OCR 识别...")
+    try:
+        image_bytes = base64.b64decode(image_b64, validate=True)
+    except Exception:
+        logger.warning("[Preprocess] base64 解码失败，拦截")
+        return {
+            "ocr_block": {"kind": "bad_image", "detail": "图片数据格式错误"},
+            "user_input": None,
+        }
+
+    try:
+        ocr, raw_ocr = await recognize_structured(image_bytes)
+    except (TimeoutError, OpenAIError) as e:
+        logger.error(f"[Preprocess] OCR 调用失败: {type(e).__name__}: {e}")
+        return {
+            "ocr_block": {"kind": "ocr_error", "detail": str(e)},
+            "user_input": None,
+        }
+
+    logger.info(
+        f"[Preprocess] OCR 完成 | recognized={ocr.recognized} | amount={ocr.amount} | unclear={ocr.unclear_fields}"
+    )
+
+    # ─── 防幻觉闸门：无法可靠识别就拦截，绝不让 agent 猜金额记账 ───
+    if not ocr.recognized:
+        reason = ocr.reason or "未识别到可读的文字"
+        logger.warning(f"[Preprocess] OCR 未识别到有效内容，拦截 | reason={reason} | 原始输出: {raw_ocr[:200]}")
+        return {
+            "ocr_block": {"kind": "no_text", "detail": reason},
+            "user_input": None,
+        }
+    if not ocr.is_bookable():
+        logger.warning(f"[Preprocess] OCR 金额缺失或无效，拦截记账 | 原始输出: {raw_ocr[:200]}")
+        return {
+            "ocr_block": {"kind": "no_amount", "detail": ""},
+            "user_input": None,
+        }
+
+    enhanced = (
+        f"{ocr.to_agent_text()}\n\n"
+        f"[用户说]：{user_input}\n"
+        f"请根据以上 OCR 识别结果新增一笔交易记录（调用 add_transaction）。\n"
+        f"金额以 OCR 识别结果为准（{ocr.amount}），不可改、不可四舍五入、不可猜测；"
+        f"若置信度提示中列出未识别字段，先向用户确认后再记账，不得臆测。"
+    )
+    return {
+        "messages": [HumanMessage(content=enhanced)],
+        "user_input": None,
+    }
+
+
+async def respond_blocked_node(state: AgentState) -> dict:
+    """防幻觉拦截回复节点：不进入 agent，直接返回错误提示"""
+    block = state.get("ocr_block") or {}
+    kind = block.get("kind", "no_text")
+    detail = block.get("detail", "")
+
+    if kind == "no_amount":
+        reply = (
+            "❌ 图片中的**金额**无法被可靠识别（模糊、缺失或格式异常）。"
+            "为避免记错账，已取消本次自动记账。\n\n"
+            "请重新拍摄金额区域清晰的图片，或直接手动输入交易信息。"
+        )
+    elif kind == "bad_image":
+        reply = "❌ 图片数据格式错误，请重新上传（支持 JPG/PNG）。"
+    elif kind == "ocr_error":
+        reply = f"❌ 图片识别暂时失败（{detail or '服务异常'}）。请稍后重试，或直接手动输入交易信息。"
+    else:
+        reply = (
+            f"❌ 无法从这张图片中识别到有效的交易信息（{detail or '未识别到可读的文字'}）。\n\n"
+            "建议：重新拍摄，保证单据正对镜头、光线充足、文字清晰；也可以直接手动输入交易信息。"
+        )
+
+    logger.info(f"[Preprocess] 拦截回复: {reply[:80]}")
+    return {"messages": [AIMessage(content=reply)], "ocr_block": None}
 
 
 # ─── 节点函数 ─────────────────────────────────────────────────────────────────
@@ -195,6 +302,20 @@ async def tools_node(state: AgentState) -> dict:
 
 
 # ─── 路由函数 ─────────────────────────────────────────────────────────────────
+
+def should_block(state: AgentState) -> str:
+    """预处理后路由：OCR 防幻觉拦截是否生效
+
+    返回:
+        "blocked" - 进入 respond_blocked 直接回复拦截文案
+        "proceed" - 进入 agent 正常推理
+    """
+    if state.get("ocr_block"):
+        logger.debug("[Router] preprocess → blocked")
+        return "blocked"
+    logger.debug("[Router] preprocess → proceed")
+    return "proceed"
+
 
 def should_continue(state: AgentState) -> str:
     """判断 Agent 是否需要调用工具

@@ -32,27 +32,40 @@
 
 ```python
 class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    current_user_id: str
+    messages: Annotated[list, add_messages]   # 对话历史（含 OCR 增强后的文本）
+    current_user_id: str                       # 当前登录用户（JWT 注入，多租户隔离）
+    user_input: str                            # 本次请求原始文本（preprocess 消费后清空）
+    ocr_block: dict | None                     # OCR 防幻觉拦截信息（respond_blocked 消费后清空）
 ```
 
-### 节点 (Nodes) - MVP
+> **图片不经过 state**：图片 base64 经 `config["configurable"]["image_base64"]`
+> 传入 preprocess 节点，避免 checkpointer 持久化图片字节（隐私 + 体积）。
 
-- **preprocess_node**：接收用户输入。若有图片，调用 Qwen3-OCR 转写为文本，拼接到 user_message。
-- **agent_node**：绑定工具集（add_transaction, query_transactions），调用 DeepSeek 推理。
-- **tools_node**：执行工具调用并返回结果。
+### 节点 (Nodes)
 
-### 边 (Edges) - MVP
+- **preprocess_node**：接收 `user_input`（+ 可选图片）。有图片时调用 Qwen3-OCR
+  识别，过**防幻觉闸门**：识别失败 / 金额不可信 → 写入 `ocr_block` 走拦截分支，
+  绝不进入 agent（防 LLM 猜金额记账）；识别成功 → 组装含 OCR 上下文的 HumanMessage。
+  无图片时直接透传用户文本。
+- **respond_blocked_node**：OCR 拦截回复节点，直接返回错误提示，不调用 LLM。
+- **agent_node**：绑定工具集（add/query/update/delete + 批量版），调用 DeepSeek 推理。
+- **tools_node**：执行工具调用，强制注入 `current_user_id`（防越权）。
+
+### 边 (Edges)
 
 ```
-START -> preprocess_node -> agent_node
-agent_node -> tools_node (有工具调用) / END (无工具调用)
-tools_node -> agent_node (工具结果返回后继续推理)
+START -> preprocess
+preprocess -> respond_blocked (OCR 拦截) / agent (正常)
+agent -> tools (有工具调用) / END (无工具调用)
+tools -> agent
+respond_blocked -> END
 ```
 
-### Phase 2 扩展节点
+### HITL 人工复核（修改/删除）
 
-- **human_review_node**：处理 update/delete，触发 interrupt 挂起等待人工响应。
+- update/delete 工具内 `interrupt()` 暂停（无需独立节点），预览含完整明细。
+- 审批恢复由 API 层 `_resume_graph` 手动执行 + `aupdate_state` 修补 checkpoint
+  （当前实现，待迁移 `Command(resume)`，见 PROJECT_STATE 决策记录）。
 
 ## 4. OCR 标准化处理流程
 

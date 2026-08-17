@@ -1,16 +1,14 @@
 """Chat 路由 - POST /chat"""
 
-import base64
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphInterrupt
 
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.agent.graph import compile_graph
 from app.checkpointer import get_checkpointer
-from app.services.ocr_service import recognize_structured
 from app.auth.dependencies import get_current_user
 from app.models.user import User
 from app.config import settings
@@ -134,60 +132,16 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
             logger.info(f"[/chat] 用户拒绝操作，恢复图执行 | thread={request.thread_id}")
             return await _resume_graph(request.thread_id, approved=False, user_id=current_user.id)
 
-        # 构造用户消息
-        user_content = request.message
+        # 构造图输入：user_input + 图片（OCR 识别与防幻觉闸门在 preprocess 节点内完成）
+        # 图片经 config["configurable"] 传入（不进 state/checkpoint），避免图片字节被持久化
+        if request.image_base64 and len(request.image_base64) > settings.MAX_UPLOAD_BYTES * 4 // 3 + 8:
+            raise HTTPException(status_code=400, detail="图片过大，请压缩后重新上传")
 
-        # 如果有图片，先 OCR
-        if request.image_base64:
-            logger.info("[/chat] 检测到图片，开始 OCR 识别...")
-            # 先做粗略长度预检，避免超大 base64 直接解码占用内存
-            if len(request.image_base64) > settings.MAX_UPLOAD_BYTES * 4 // 3 + 8:
-                raise HTTPException(status_code=400, detail="图片过大，请压缩后重新上传")
-            try:
-                image_bytes = base64.b64decode(request.image_base64, validate=True)
-            except Exception:
-                raise HTTPException(status_code=400, detail="图片数据格式错误，请重新上传")
-
-            # OCR 识别 + 结构化解析（文本框数组模式会自动重试）
-            ocr, raw_ocr = await recognize_structured(image_bytes)
-            logger.info(f"[/chat] OCR 完成 | recognized={ocr.recognized} | amount={ocr.amount} | unclear={ocr.unclear_fields}")
-
-            # ─── 防幻觉闸门：无法可靠识别就拦截，绝不让 agent 猜金额记账 ───
-            if not ocr.recognized:
-                reason = ocr.reason or "未识别到可读的文字"
-                logger.warning(f"[/chat] OCR 未识别到有效内容，拦截 | reason={reason} | 原始输出: {raw_ocr[:200]}")
-                return ChatResponse(
-                    reply=(
-                        f"❌ 无法从这张图片中识别到有效的交易信息（{reason}）。\n\n"
-                        "建议：重新拍摄，保证单据正对镜头、光线充足、文字清晰；"
-                        "也可以直接手动输入交易信息。"
-                    ),
-                    thread_id=request.thread_id,
-                )
-            if not ocr.is_bookable():
-                logger.warning(f"[/chat] OCR 金额缺失或无效，拦截记账 | 原始输出: {raw_ocr[:200]}")
-                return ChatResponse(
-                    reply=(
-                        "❌ 图片中的**金额**无法被可靠识别（模糊、缺失或格式异常）。"
-                        "为避免记错账，已取消本次自动记账。\n\n"
-                        "请重新拍摄金额区域清晰的图片，或直接手动输入交易信息。"
-                    ),
-                    thread_id=request.thread_id,
-                )
-
-            user_content = (
-                f"{ocr.to_agent_text()}\n\n"
-                f"[用户说]：{request.message}\n"
-                f"请根据以上 OCR 识别结果新增一笔交易记录（调用 add_transaction）。\n"
-                f"金额以 OCR 识别结果为准（{ocr.amount}），不可改、不可四舍五入、不可猜测；"
-                f"若置信度提示中列出未识别字段，先向用户确认后再记账，不得臆测。"
-            )
-
-        # 调用 Agent
         input_state = {
-            "messages": [HumanMessage(content=user_content)],
+            "user_input": request.message,
             "current_user_id": current_user.id,
         }
+        config["configurable"]["image_base64"] = request.image_base64
 
         logger.debug("[/chat] 调用 Agent...")
 
