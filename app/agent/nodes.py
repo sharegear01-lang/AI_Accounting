@@ -1,7 +1,6 @@
 """LangGraph 节点实现"""
 
 import base64
-import re
 import time
 
 from langchain_core.messages import SystemMessage, AIMessage, ToolMessage, HumanMessage
@@ -40,32 +39,29 @@ SYSTEM_PROMPT = """你是个人财务记账助手。
 - 查询结果用表格展示，必要时汇总。
 - 记账完成（add_transaction 成功）后直接向用户返回结果，禁止对刚创建的记录再次查询或修改。
 - 仅在用户明确要求修改/删除某条已有记录时，才调用修改/删除工具；不要自行推断用户有修改意图。
+- 修改/删除/查询必须真实调用工具完成：工具成功执行前，禁止向用户声称"已修改/已删除"；调用失败要如实告知。
 """
 
 # ─── LLM 实例 ────────────────────────────────────────────────────────────────
 
-def _get_llm(thinking=False, tool_choice=None):
+def _get_llm(thinking=False):
     """创建 DeepSeek LLM 实例并绑定工具
 
     Args:
         thinking: 是否启用思考模式（默认关闭，避免 reasoning_content 兼容问题）
-        tool_choice: 工具选择策略，如 "any" 强制调用工具
     """
     model_kwargs = {}
     if not thinking:
         # 禁用思考模式以避免 reasoning_content 兼容问题
         model_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
-    llm = ChatDeepSeek(
+    return ChatDeepSeek(
         model=settings.DEEPSEEK_MODEL,
         api_key=settings.DEEPSEEK_API_KEY,
         base_url=settings.DEEPSEEK_BASE_URL,
         streaming=True,
         model_kwargs=model_kwargs,
-    )
-    if tool_choice:
-        return llm.bind_tools(ALL_TOOLS, tool_choice=tool_choice)
-    return llm.bind_tools(ALL_TOOLS)
+    ).bind_tools(ALL_TOOLS)
 
 
 # ─── 预处理节点（OCR + 防幻觉闸门）──────────────────────────────────────────
@@ -173,27 +169,6 @@ async def respond_blocked_node(state: AgentState) -> dict:
 
 # ─── 节点函数 ─────────────────────────────────────────────────────────────────
 
-def _last_user_message_wants_modify_delete(messages) -> bool:
-    """检查用户最近的实际意图是否包含修改/删除请求
-
-    只看最后一条 HumanMessage，且只扫描用户真正输入的部分
-    （"[用户说]：" 标记之后），不扫描 OCR 注入的识别文本——
-    单据截图常含"修改地址""删除订单"等字样，若扫描全文会把普通
-    记账请求误判为修改/删除意图，进而触发 tool_choice="any" 强制
-    重试，让已完成记账的 agent 再次调用工具（多余的双动作）。
-    """
-    for msg in reversed(messages):
-        if type(msg).__name__ == "HumanMessage":
-            content = (msg.content or "").lower()
-            marker = "[用户说]"
-            idx = content.rfind(marker)
-            if idx != -1:
-                # 只取用户实际输入部分，忽略 OCR 识别文本与系统注入的指令
-                content = content[idx + len(marker):]
-            return bool(re.search(r'(修改|删除|更改|改一下|改成|变更为|删掉|去掉)', content))
-    return False
-
-
 def _trim_history(messages: list) -> list:
     """滑动窗口裁剪：保留最近 N 条消息，向前对齐到 HumanMessage 起点
 
@@ -258,18 +233,6 @@ async def agent_node(state: AgentState) -> dict:
     elapsed = time.time() - start
 
     has_tool_calls = hasattr(response, "tool_calls") and response.tool_calls
-
-    # 如果用户有修改/删除意图但 LLM 没调工具，用 tool_choice="any" 重试
-    wants_modify_delete = _last_user_message_wants_modify_delete(messages)
-    if wants_modify_delete and not has_tool_calls:
-        logger.info("[Agent] LLM 未调用工具，强制重试...")
-        force_llm = _get_llm(thinking=False, tool_choice="any")
-        start2 = time.time()
-        response = await force_llm.ainvoke(full_messages)
-        elapsed2 = time.time() - start2
-        has_tool_calls = hasattr(response, "tool_calls") and response.tool_calls
-        elapsed = elapsed + elapsed2
-        logger.info(f"[Agent] 重试完成 | 耗时: {elapsed2:.2f}s | 工具调用: {has_tool_calls}")
 
     # 记录 LLM 决策结果
     if has_tool_calls:
