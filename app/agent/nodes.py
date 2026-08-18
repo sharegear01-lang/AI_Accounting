@@ -231,16 +231,10 @@ async def agent_node(state: AgentState) -> dict:
     system_msg = SystemMessage(content=SYSTEM_PROMPT.format(today=today_str))
 
     # 组装消息：system + 历史对话
-    # 1. 清除 reasoning_content（DeepSeek 思考模式残留）
-    # 2. 修补孤儿 tool_calls（interrupt 暂停后 checkpoint 中缺少 ToolMessage）
-    full_messages = [system_msg]
-    for msg in messages:
-        if hasattr(msg, 'additional_kwargs') and 'reasoning_content' in msg.additional_kwargs:
-            msg_copy = msg.model_copy()
-            msg_copy.additional_kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != 'reasoning_content'}
-            full_messages.append(msg_copy)
-        else:
-            full_messages.append(msg)
+    # 注意：这里不再清理 reasoning_content——本图始终以 thinking=False 调用，
+    # API 不会返回该字段。若未来启用 thinking 模式，DeepSeek 要求
+    # reasoning_content 原样回传（缺失报 400），届时需改为保留该字段。
+    full_messages = [system_msg] + messages
 
     # 修补孤儿 tool_calls：找到有 tool_calls 但缺少对应 ToolMessage 的 AI 消息
     existing_tool_ids = {m.tool_call_id for m in full_messages if isinstance(m, ToolMessage)}
