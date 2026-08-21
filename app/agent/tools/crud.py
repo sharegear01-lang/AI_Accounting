@@ -7,6 +7,7 @@ LLM 看不到、也无法伪造该字段，从根源上杜绝跨用户越权。
 
 from datetime import date, datetime
 from decimal import Decimal
+import time
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -305,12 +306,15 @@ async def update_transaction(
                 update_values["description"] = description
 
             # interrupt 暂停，等待用户确认
+            # interrupt_at：记录发起时间戳，供 API 层判断确认是否超时
+            #（超时后自动取消，避免 interrupt 永久挂起阻塞图执行）
             approved = interrupt({
                 "type": "update_preview",
                 "preview": preview,
                 "transaction_id": transaction_id,
                 "changes": changes,
                 "fields": {k: str(v) for k, v in update_values.items()},
+                "interrupt_at": time.time(),
             })
 
             if not approved:
@@ -371,6 +375,7 @@ async def delete_transaction(
                 "type": "delete_preview",
                 "preview": preview,
                 "transaction_id": transaction_id,
+                "interrupt_at": time.time(),
             })
 
             if not approved:
@@ -450,6 +455,7 @@ async def delete_transactions(
         "preview": preview,
         "transaction_ids": ids,
         "skipped_missing": missing,
+        "interrupt_at": time.time(),
     })
 
     if not approved:
@@ -569,6 +575,7 @@ async def update_transactions(
         "changes": {str(k): v for k, v in per_record_changes.items()},
         "skipped_missing": missing,
         "fields": {k: str(v) for k, v in update_values.items()},
+        "interrupt_at": time.time(),
     })
 
     if not approved:

@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # 传 LLM 前裁剪（checkpoint 保留完整历史供审计/调试）；按需调整。
     MAX_HISTORY_MESSAGES: int = 10
 
+    # HITL 人工确认超时（秒）
+    # interrupt 暂停后，若用户不点击"同意/拒绝"也不发新消息，确认会一直挂在
+    # checkpoint 中阻塞该线程的图执行。超时后（或用户发新消息打断时）自动按
+    # "拒绝"取消，避免确认永久挂起。默认 300 秒（5 分钟）。
+    HITL_EXPIRY_SECONDS: int = 300
+
     # LangSmith
     LANGSMITH_TRACING: bool = False
     LANGSMITH_ENDPOINT: str = "https://api.smith.LangChain.com"

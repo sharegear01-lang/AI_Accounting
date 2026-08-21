@@ -45,12 +45,17 @@
 
             <!-- AI 消息：markdown / HITL 卡片 / 加载中 -->
             <template v-else>
-              <!-- HITL 确认卡片 -->
+              <!-- HITL 确认卡片（仅'同意/拒绝'两个按钮，点击直接恢复图）
+                   resolved/expired/cancelled 为卡片生命周期状态，由父组件跟踪 -->
               <ApprovalCard
                 v-if="msg.isApproval"
                 :thread-id="threadId"
                 :preview="msg.approvalPreview"
-                @resolved="handleResolved"
+                :expires-in="msg.expiresIn"
+                :cancelled="msg.cancelled"
+                :disabled="sending"
+                @resolved="(reply) => handleResolved(msg, reply)"
+                @expired="msg.expired = true"
               />
               <!-- 加载指示 -->
               <div v-else-if="msg.loading" class="typing-indicator">
@@ -144,6 +149,10 @@ const messages = reactive([
     loading: false,
     isApproval: false,
     hasImage: false,
+    expiresIn: null,
+    resolved: false,
+    expired: false,
+    cancelled: false,
   },
 ])
 
@@ -220,7 +229,7 @@ async function sendMessage() {
   pendingImage.value = ''
 
   // AI 占位（加载中）
-  addMessage({ role: 'assistant', content: '', loading: true, isApproval: false, hasImage: false })
+  addMessage({ role: 'assistant', content: '', loading: true, isApproval: false, hasImage: false, expiresIn: null })
 
   sending.value = true
   try {
@@ -233,16 +242,26 @@ async function sendMessage() {
     const loadingIdx = messages.findIndex((m) => m.loading)
     if (loadingIdx !== -1) messages.splice(loadingIdx, 1)
 
-    const reply = data.reply || ''
-    // 检测 HITL interrupt 预览
-    const isApproval = reply.includes('请回复"确认"批准操作')
+    // 用户发新消息时，后端自动取消了挂起的待确认操作 → 把仍在展示中的确认卡片标记为已取消
+    if (data.cancelled_confirmations > 0) {
+      messages.forEach((m) => {
+        if (m.isApproval && !m.resolved && !m.expired && !m.cancelled) m.cancelled = true
+      })
+    }
+
+    // 后端返回 requires_confirmation=true → HITL interrupt，渲染确认卡（同意/拒绝按钮）
+    const isApproval = data.requires_confirmation === true
     addMessage({
       role: 'assistant',
-      content: reply,
+      content: isApproval ? (data.preview || data.reply) : (data.reply || ''),
       loading: false,
       isApproval,
-      approvalPreview: isApproval ? reply.replace(/\n*请回复"确认"批准操作，或回复"取消"拒绝。\s*$/, '') : '',
+      approvalPreview: isApproval ? (data.preview || data.reply) : '',
+      expiresIn: data.expires_in_seconds ?? null,
       hasImage: false,
+      resolved: false,
+      expired: false,
+      cancelled: false,
     })
   } catch (e) {
     const loadingIdx = messages.findIndex((m) => m.loading)
@@ -253,6 +272,10 @@ async function sendMessage() {
       loading: false,
       isApproval: false,
       hasImage: false,
+      expiresIn: null,
+      resolved: false,
+      expired: false,
+      cancelled: false,
     })
   } finally {
     sending.value = false
@@ -260,8 +283,9 @@ async function sendMessage() {
   }
 }
 
-// HITL 批准/拒绝完成后，将结果作为 AI 消息追加
-function handleResolved(reply) {
+// HITL 同意/拒绝完成后：标记卡片已处理，将结果作为 AI 消息追加
+function handleResolved(msg, reply) {
+  msg.resolved = true
   if (reply) {
     addMessage({
       role: 'assistant',
@@ -269,6 +293,10 @@ function handleResolved(reply) {
       loading: false,
       isApproval: false,
       hasImage: false,
+      expiresIn: null,
+      resolved: false,
+      expired: false,
+      cancelled: false,
     })
   }
 }

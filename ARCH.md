@@ -177,7 +177,7 @@ frontend/
 
 - 所有请求走 `/api` 前缀，Vite dev 代理转发至 `http://127.0.0.1:8000`。
 - JWT token 存 localStorage，axios 请求拦截器自动附加 `Authorization: Bearer`。
-- HITL：后端 interrupt 预览回复含"请回复确认批准操作"，前端检测后渲染 ApprovalCard，点击批准/拒绝调用 `/api/approve/{thread_id}` / `/api/reject/{thread_id}`。
+- HITL：interrupt 暂停时 `/chat` 返回结构化响应（`requires_confirmation=true` + `preview` + `expires_in_seconds`），前端据此渲染 ApprovalCard 的『同意/拒绝』按钮；点击后带 `approve` 字段重新请求 `/chat`，后端直接恢复被暂停的图（不再使用自然语言“确认/取消”，避免误判）。确认超时（`HITL_EXPIRY_SECONDS`，默认 300s）或用户发新消息打断时自动按拒绝取消，防止 interrupt 永久挂起；新消息打断会返回 `cancelled_confirmations` 数量，前端把仍在展示的确认卡片标记为『已取消』，避免点击失效按钮得到“无需重复确认”的困惑提示。
 - 图片：前端 canvas 压缩至长边 512px / JPEG 0.7，转 base64 随聊天发送。
 
 ## 8. 部署方案

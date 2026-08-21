@@ -33,12 +33,8 @@ export const api = {
   register: (data) => http.post('/register', data),
   login: (data) => http.post('/login', data),
 
-  // 聊天
+  // 聊天（含 HITL 按钮决策：approve=True/False 时直接恢复被 interrupt 暂停的图）
   chat: (data) => http.post('/chat', data),
-
-  // HITL 人工复核
-  approve: (threadId) => http.post(`/approve/${threadId}`),
-  reject: (threadId) => http.post(`/reject/${threadId}`),
 }
 
 export default http
