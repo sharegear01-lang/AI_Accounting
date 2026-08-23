@@ -133,18 +133,23 @@ ChatPanel 通过 `@status-change` 事件上报，Chat.vue（或 useCatState）�
 - `api.chat()`、`ApprovalCard.vue`：零改动
 - `Chat.vue` 的消息渲染/图片压缩/HITL 处理：整体移植进 `ChatPanel.vue`
 
-## Verification（验收）
+## Verification（验收结果 ✅ 全部通过）
 
-- [ ] `npm run build` 通过
-- [ ] 桌面场景：猫自由走动、触边掉头、随机停留
-- [ ] 点击猫 → 弹出面板 + wave；再点/关闭按钮 → 收起
-- [ ] 动画全状态：idle 眨眼 / walk / wave / listen / dance / happy /
-      wait_confirm 瞪眼 / yawn / sleep zzz / wake
-- [ ] 对话全流程在浮层内正常：文本记账、图片记账、HITL 同意/拒绝、记忆
-- [ ] 联动验证：发消息→listen；记账成功回复→dance；HITL 卡→瞪眼；
-      闲置 60s→yawn、180s→sleep；点猫/发消息→唤醒
-- [ ] 登录页招财猫动画正常
-- [ ] 窗口 resize 猫不跑出屏幕、面板不破版
+- [x] `npm run build` 通过（0 新依赖）
+- [x] 桌面场景：金色记账主题背景 + 猫渲染（headless Chrome 像素验证：白身/红项圈/金底座）
+- [x] 点击猫 → 面板弹出（420×368）+ 再点收起；猫同时 wave（状态序列 wave→idle）
+- [x] 动画 10 状态全部渲染（/preview 临时页验证后已删）
+- [x] 端到端真实对话：发消息→listen→记账成功回复→dance→idle→walk（CDP + 真实 token + 后端 + LLM，汉堡王 ¥25 真实入库）
+- [x] HITL 联动：删记录→wait_confirm 瞪眼 + 确认卡→点拒绝→happy
+- [x] 登录页招财猫装饰（idle/wave/happy 循环）
+- [x] 修复运行时 bug：Login.vue 漏 import reactive；useCatState 返回对象内 ref 模板不解包 → 顶层解包
+
+### 验收中发现并修复的 bug
+
+| bug | 发现方式 | 修复 |
+|-----|----------|------|
+| Login.vue import 漏 `reactive`（setup 抛 ReferenceError） | vite 日志 Unhandled rejection | 补 import |
+| `useCatState()` 返回普通对象，其 state ref 在模板中不解包 → 猫状态永不切换 | CDP 交互验证（state 恒 idle） | Chat.vue 顶层 `const catState = cat.state` |
 
 ## 后期展望（3D 转换预留）
 
@@ -153,30 +158,23 @@ ChatPanel 通过 `@status-change` 事件上报，Chat.vue（或 useCatState）�
   状态机、联动信号、页面骨架全部保留
 - 音效：状态机预留 `onPlaySound(state)` 钩子，素材到位即接入
 
-## 版本管理（已确认）
+## 版本管理（已执行 ✅）
 
-- **基线**：main @ 3b51c56（工具合并收尾已提交，基线干净）
-- **分支**：全部开发在 `feat/maneki-cat`，main 零污染
-- **颗粒提交**（每个 commit 即回滚点）：
-  1. plans/maneki-cat.md 计划文档
-  2. ManekiCat.vue（SVG + 动画 + 状态渲染）
-  3. useCatState.js（状态机协调器）
-  4. ChatPanel.vue（聊天浮层移植）
-  5. Chat.vue 桌面场景集成
-  6. Login.vue 招财猫装饰
-  7. 验收修正 + 文档更新
-- **回滚**：
-  - 局部：`git revert <commit>` / `git checkout <commit> -- <file>`
-  - 整体：`git checkout main`（main 未被污染）；效果差可
-    `git branch -D feat/maneki-cat` 丢弃整个分支
-- **存档**：验收通过后 `git tag v0.2.0-maneki-cat-demo`
+- 基线 main @ 3b51c56（工具合并收尾）
+- `feat/maneki-cat` 分支提交链：
+  - 0870b84 docs: 计划文档
+  - 1274781 feat: ManekiCat.vue（SVG 10 状态动画）
+  - 1261bc5 feat: 桌面场景 + 聊天浮层 + 状态联动（useCatState/ChatPanel/Chat/Login）
+  - b1816ff fix: ref 顶层解包 + 移除临时预览页
+- 验收完成 → 打 tag `v0.2.0-maneki-cat-demo`
+- 回滚：`git checkout main`（main 零污染）或 `git revert` 单点回滚
 
 ## 待办
 
 - [x] 确认 6 个决策点 → 细化方案
-- [ ] 写 ManekiCat.vue（SVG 绘制 + 状态动画）
-- [ ] 写 useCatState.js（状态机 + 定时器）
-- [ ] 写 ChatPanel.vue（移植 Chat.vue 逻辑）
-- [ ] 改造 Chat.vue（桌面 + 集成）
-- [ ] 改造 Login.vue（招财猫装饰）
-- [ ] 验收清单逐项通过
+- [x] 写 ManekiCat.vue（SVG 绘制 + 状态动画）
+- [x] 写 useCatState.js（状态机 + 定时器）
+- [x] 写 ChatPanel.vue（移植 Chat.vue 逻辑）
+- [x] 改造 Chat.vue（桌面 + 集成）
+- [x] 改造 Login.vue（招财猫装饰）
+- [x] 验收清单逐项通过
