@@ -44,3 +44,6 @@ frontend/dist/
 frontend/.vite/
 frontend/*.local
 frontend/certs/   # 本地 HTTPS 证书/私钥（scripts/https-setup.ps1 生成，绝不入库）
+
+# ===== 本地 HTTPS 证书（scripts/https-setup.ps1 生成）=====
+frontend/certs/

@@ -20,7 +20,8 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["chat"])
 
 # 触发 interrupt 的工具名（审批路径按此从 tool_calls 中定位待确认调用）
-_HITL_TOOLS = ("delete_transaction", "delete_transactions", "update_transaction", "update_transactions")
+# 单条与批量已合并：update/delete 只有一个工具（transaction_ids 传单个或列表）
+_HITL_TOOLS = ("update_transactions", "delete_transactions")
 
 
 def _thread_config(user_id: str, thread_id: str) -> dict:

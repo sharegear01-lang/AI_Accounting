@@ -6,6 +6,7 @@ import time
 from langchain_core.messages import SystemMessage, AIMessage, ToolMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_deepseek import ChatDeepSeek
+from langchain_ollama import ChatOllama
 from langgraph.errors import GraphInterrupt
 from openai import OpenAIError
 
@@ -23,7 +24,7 @@ SYSTEM_PROMPT = """你是个人财务记账助手。
 
 ## 功能
 
-1. 记账：用户描述消费/收入时，调用 add_transaction。
+1. 记账：用户描述消费/收入时，调用 add_transactions（一笔或多笔一次传入，单笔传单元素列表；如“记一笔星巴克45元”传 [单条]）。
 2. 查询：用户想查看账单时，调用 query_transactions。
 3. 修改：用户要修改记录时，先调用 query_transactions 找到 ID，然后立即调用 update_transactions（一个或多个 ID 一次传入，只确认一次）。
 4. 删除：用户要删除记录时，先调用 query_transactions 找到 ID，然后立即调用 delete_transactions（一个或多个 ID 一次传入，只确认一次）。
@@ -32,18 +33,18 @@ SYSTEM_PROMPT = """你是个人财务记账助手。
 
 - **删除/修改前禁止用自然语言再次询问用户"是否确认/要不要删/可以吗"**——直接调用 delete_transactions / update_transactions 工具即可。工具会暂停并展示变更预览，由用户在界面点击『同意/拒绝』按钮确认，无需（也不应）在文字里先征求同意。
 - 查询（query_transactions）不产生确认，直接执行并展示结果。
-- 记账（add_transaction）不产生确认，直接执行并展示结果。
+- 记账（add_transactions）不产生确认，直接执行并展示结果。
 
 ## 规则
 
-- **批量操作必须用批量工具**：用户要求修改/删除多条记录时，必须把全部 ID 放进一次 update_transactions / delete_transactions 调用（展示完整明细、只确认一次）；禁止为每条记录分别调用 update_transaction / delete_transaction（那会导致逐条确认）。
+- **单条与批量是同一个工具**：update_transactions / delete_transactions 的 transaction_ids 可传单个整数或整数列表（如 5 或 [5, 6]），不要为了多条记录分别多次调用——一次调用传全部 ID，只确认一次。
 - 金额：支出正数，收入负数。
 - 日期：根据当前日期推算，格式 YYYY-MM-DD。当前日期：{today}。
 - 分类：自动推断（餐饮、购物、交通、娱乐、居住、医疗、教育、其他）。
 - 信息不足时礼貌追问。
 - 始终用中文回复。
 - 查询结果用表格展示，必要时汇总。
-- 记账完成（add_transaction 成功）后直接向用户返回结果，禁止对刚创建的记录再次查询或修改。
+- 记账完成（add_transactions 成功）后直接向用户返回结果，禁止对刚创建的记录再次查询或修改。
 - 仅在用户明确要求修改/删除某条已有记录时，才调用修改/删除工具；不要自行推断用户有修改意图。
 - 修改/删除/查询必须真实调用工具完成：工具成功执行前，禁止向用户声称"已修改/已删除"；调用失败要如实告知。
 """
@@ -68,7 +69,11 @@ def _get_llm(thinking=False):
         streaming=True,
         model_kwargs=model_kwargs,
     ).bind_tools(ALL_TOOLS)
-
+    # return ChatOllama(
+    #     base_url="http://localhost:11434",
+    #     model="qwen3.5-fast",
+    #     reasoning=thinking
+    # ).bind_tools(ALL_TOOLS)
 
 # ─── 预处理节点（OCR + 防幻觉闸门）──────────────────────────────────────────
 
@@ -137,7 +142,7 @@ async def preprocess_node(state: AgentState, config: RunnableConfig) -> dict:
     enhanced = (
         f"{ocr.to_agent_text()}\n\n"
         f"[用户说]：{user_input}\n"
-        f"请根据以上 OCR 识别结果新增一笔交易记录（调用 add_transaction）。\n"
+        f"请根据以上 OCR 识别结果新增交易记录（调用 add_transactions，一笔或多笔一次传入）。\n"
         f"金额以 OCR 识别结果为准（{ocr.amount}），不可改、不可四舍五入、不可猜测；"
         f"若置信度提示中列出未识别字段，先向用户确认后再记账，不得臆测。"
     )
