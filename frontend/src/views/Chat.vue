@@ -24,9 +24,9 @@
       @click="handleCatClick"
     >
       <ManekiCat
-        :state="cat.state"
+        :state="catState"
         :size="CAT_SIZE"
-        :force-closed="cat.state === 'sleep'"
+        :force-closed="catState === 'sleep'"
       />
       <!-- 点击提示（首次） -->
       <div v-if="showHint" class="hint-bubble">点我记账 🐱</div>
@@ -66,6 +66,8 @@ const threadId = localStorage.getItem('thread_id') || `web_${Date.now()}`
 localStorage.setItem('thread_id', threadId)
 
 const cat = useCatState()
+// useCatState 返回普通对象内的 ref 在模板中不会自动解包 → 顶层解包
+const catState = cat.state
 const desktopRef = ref(null)
 const panelOpen = ref(false)
 const showHint = ref(true)
@@ -104,7 +106,7 @@ function moveCat() {
 
 // 猫进入 walk 状态 → 移动到随机目标（过渡由 CSS 驱动）
 watch(
-  () => cat.state.value,
+  () => catState.value,
   (s) => {
     if (s === 'walk') moveCat()
   },
