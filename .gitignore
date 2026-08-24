@@ -33,10 +33,15 @@ Thumbs.db
 *.png
 graph.png
 logs/
-.langgraph_api/   # LangGraph CLI 运行时检查点（.pckl）
+.langgraph_api/
 
 # ===== 测试/临时 =====
+# 手工测试用的交易单据样本图（不入库）
+test_image*.jpg
+# 集成冒烟脚本（依赖真实服务/DB/LLM，手动执行，不入库）
 test_*.py
+# 但图级单元测试（全 mock，CI 执行）必须入库
+!test_preprocess.py
 
 # ===== 前端 Vue3 =====
 frontend/node_modules/

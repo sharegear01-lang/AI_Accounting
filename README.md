@@ -86,6 +86,20 @@ python main.py
 
 服务启动于 `http://127.0.0.1:8000`，Swagger 文档见 `http://127.0.0.1:8000/docs`。
 
+> **数据库迁移**：schema 由 Alembic 管理（`alembic/`），启动时自动执行
+> `alembic upgrade head`（首次启动自动建表，旧库平滑升级）。手动操作：
+>
+> ```bash
+> alembic upgrade head    # 升级到最新
+> alembic downgrade base  # 回退到空库
+> alembic check           # 检查模型与库是否漂移（CI 门禁）
+> ```
+>
+> LangGraph checkpoint 表（`checkpoints` 系列）由 checkpointer 自动创建，不纳入 Alembic 管理。
+>
+> **启动方式**：统一使用 `python main.py`（Windows 下 `uvicorn main:app` 直启会因
+> 事件循环策略失败）。端口可用 `PORT` 环境变量覆盖，生产环境 `.env` 设 `DEBUG=False` 自动关闭热重载。
+
 ### 4. 启动前端
 
 ```bash

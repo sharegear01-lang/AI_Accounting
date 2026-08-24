@@ -1,7 +1,8 @@
 """AI 会计助手 - FastAPI 启动入口"""
 
-import sys
 import asyncio
+import os
+import sys
 
 # Windows 下 psycopg 异步需要 SelectorEventLoop（必须在所有异步库导入前设置）
 if sys.platform == "win32":
@@ -15,25 +16,42 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import uvicorn
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+import uvicorn
+from alembic.config import Config as AlembicConfig
 from fastapi import FastAPI
 
-from app.database import init_db
-from app.checkpointer import init_checkpointer, close_checkpointer
-from app.logger import setup_logging, get_logger
+from alembic import command
+from app.checkpointer import close_checkpointer, init_checkpointer
+from app.config import settings
+from app.logger import get_logger, setup_logging
 
 # 初始化日志系统
 setup_logging()
 logger = get_logger(__name__)
 
 
+def run_migrations() -> None:
+    """编程式执行 alembic upgrade head（启动时自动同步 schema）
+
+    迁移是 schema 的唯一来源（取代启动时 create_all）：
+    - 新环境：首次启动自动建表
+    - 旧环境（create_all 时代建的库）：初始迁移幂等跳过已存在表，只登记版本
+    - 失败即抛异常 → 应用启动失败（fail fast），避免带脏 schema 上线
+    """
+    cfg = AlembicConfig(str(Path(__file__).resolve().parent / "alembic.ini"))
+    command.upgrade(cfg, "head")
+    logger.info("数据库迁移完成（alembic upgrade head）")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动时建表 + 初始化 checkpointer，关闭时清理"""
+    """应用生命周期：启动时执行迁移 + 初始化 checkpointer，关闭时清理"""
     logger.info("应用启动中...")
-    await init_db()
-    logger.info("数据库表初始化完成")
+    await asyncio.to_thread(run_migrations)
+    logger.info("数据库 schema 同步完成")
     await init_checkpointer()
     yield
     logger.info("应用关闭")
@@ -55,18 +73,24 @@ async def health_check():
 
 
 # 注册路由
-from app.api.chat import router as chat_router
 from app.api.auth import router as auth_router
+from app.api.chat import router as chat_router
+from app.api.transactions import router as transactions_router
+
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(transactions_router)
 
 
 if __name__ == "__main__":
+    # 注意：policy 必须在 uvicorn 创建事件循环前设置，故外部执行
+    # `uvicorn main:app`（Windows 下）会因 ProactorEventLoop 失败；
+    # 统一使用 `python main.py` 启动（生产环境 systemd 同样用该入口）。
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=int(os.getenv("PORT", "8000")),
+        reload=settings.DEBUG,  # 生产 .env 设 DEBUG=False 即关闭热重载
         reload_excludes=["logs/*", "__pycache__/*", ".idea/*"],
         loop="asyncio",
     )
