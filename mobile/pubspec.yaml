@@ -1,0 +1,30 @@
+name: aiacct_mobile
+description: "AI 会计助手移动端 Demo（Android）"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 状态管理
+  provider: ^6.1.2
+  # HTTP 客户端（拦截器模式，与前端 axios 一致）
+  dio: ^5.7.0
+  # AI 回复 Markdown 渲染
+  flutter_markdown: ^0.7.4
+  # 图片选择 + 压缩
+  image_picker: ^1.1.2
+  image: ^4.3.0
+  # Token / 配置本地存储
+  shared_preferences: ^2.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
