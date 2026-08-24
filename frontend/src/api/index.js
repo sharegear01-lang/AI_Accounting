@@ -35,6 +35,20 @@ export const api = {
 
   // 聊天（含 HITL 按钮决策：approve=True/False 时直接恢复被 interrupt 暂停的图）
   chat: (data) => http.post('/chat', data),
+
+  // 交易记录（直接 CRUD，不经 Agent）
+  transactions: {
+    // 分页查询：{ start_date, end_date, category, merchant, page, page_size }
+    list: (params) => http.get('/transactions', { params }),
+    // 首页统计汇总
+    stats: () => http.get('/transactions/stats'),
+    // 新增一笔
+    create: (data) => http.post('/transactions', data),
+    // 修改一笔
+    update: (id, data) => http.put(`/transactions/${id}`, data),
+    // 删除一笔
+    remove: (id) => http.delete(`/transactions/${id}`),
+  },
 }
 
 export default http

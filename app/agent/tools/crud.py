@@ -10,20 +10,19 @@ update_transactions / delete_transactions）。单条与批量统一走同一套
 一次 interrupt、一次确认，禁止逐条确认。
 """
 
+import time
 from datetime import date
 from decimal import Decimal
-import time
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.types import interrupt
-from langgraph.errors import GraphInterrupt
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update, delete
+from sqlalchemy import delete, select, update
 
 from app.database import async_session_factory
-from app.models.transaction import Transaction
 from app.logger import get_logger
+from app.models.transaction import Transaction
 
 logger = get_logger(__name__)
 
@@ -265,7 +264,7 @@ async def query_transactions(
         return "📭 没有找到符合条件的交易记录。"
 
     # 统计汇总
-    total = sum(float(r.amount) for r in records)
+    sum(float(r.amount) for r in records)
     total_expense = sum(float(r.amount) for r in records if float(r.amount) > 0)
     total_income = sum(float(r.amount) for r in records if float(r.amount) < 0)
 
@@ -397,7 +396,7 @@ async def update_transactions(
         return "❌ 用户拒绝了修改操作。"
 
     # 用户批准，执行修改（公共执行函数；仅作用于有实际变更的记录）
-    rowcount, err = await execute_update(list(per_record_changes.keys()), update_values, user_id)
+    _rowcount, err = await execute_update(list(per_record_changes.keys()), update_values, user_id)
     if err:
         return err
 
@@ -484,7 +483,7 @@ async def delete_transactions(
         return "❌ 用户拒绝了删除操作。"
 
     # 用户批准，批量删除（公共执行函数）
-    rowcount, err = await execute_delete(ordered_ids, user_id)
+    _rowcount, err = await execute_delete(ordered_ids, user_id)
     if err:
         return err
 

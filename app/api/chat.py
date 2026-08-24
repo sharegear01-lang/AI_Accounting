@@ -6,14 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphInterrupt
 
-from app.schemas.chat import ChatRequest, ChatResponse
 from app.agent.graph import compile_graph
 from app.agent.tools.crud import execute_delete, execute_update
-from app.checkpointer import get_checkpointer
 from app.auth.dependencies import get_current_user
-from app.models.user import User
+from app.checkpointer import get_checkpointer
 from app.config import settings
 from app.logger import get_logger
+from app.models.user import User
+from app.schemas.chat import ChatRequest, ChatResponse
 
 logger = get_logger(__name__)
 
@@ -127,7 +127,7 @@ async def _apply_decisions(
             ids = _ids_from_payload(payload)
             if approved:
                 rowcount, err = await execute_delete(ids, user_id)
-                content = f"✅ 已删除 {rowcount} 笔交易记录。" if not err else err
+                content = err if err else f"✅ 已删除 {rowcount} 笔交易记录。"
             else:
                 content = reject_note
         elif ptype == "update_preview":
@@ -136,7 +136,7 @@ async def _apply_decisions(
                 fields = dict(payload.get("fields", {}) or {})
                 rowcount, err = await execute_update(ids, fields, user_id)
                 changed = "、".join(f"{k}={v}" for k, v in fields.items())
-                content = f"✅ 已修改 {rowcount} 笔交易记录（{changed}）。" if not err else err
+                content = err if err else f"✅ 已修改 {rowcount} 笔交易记录（{changed}）。"
             else:
                 content = reject_note
         else:
@@ -347,9 +347,9 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 
     except TimeoutError as e:
         elapsed = time.time() - start_time
-        logger.error(f"[/chat] 超时 | 耗时: {elapsed:.2f}s | {e}")
-        raise HTTPException(status_code=504, detail=str(e))
+        logger.exception(f"[/chat] 超时 | 耗时: {elapsed:.2f}s | {e}")
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except Exception as e:
         elapsed = time.time() - start_time
         logger.exception(f"[/chat] 异常 | 耗时: {elapsed:.2f}s | {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"服务器内部错误：{str(e)}")
+        raise HTTPException(status_code=500, detail=f"服务器内部错误：{e!s}") from e

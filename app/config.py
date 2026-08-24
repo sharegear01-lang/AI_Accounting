@@ -3,6 +3,8 @@
 import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -21,6 +23,7 @@ class Settings(BaseSettings):
 
     # Qwen OCR (Dashscope)
     DASHSCOPE_API_KEY: str = ""
+    DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_OCR_MODEL_NAME: str = "qwen3.5-ocr"
 
     # JWT 鉴权
@@ -49,7 +52,7 @@ class Settings(BaseSettings):
     HITL_EXPIRY_SECONDS: int = 300
 
     # LangSmith
-    LANGSMITH_TRACING: bool = False
+    LANGSMITH_TRACING: bool = True
     LANGSMITH_ENDPOINT: str = "https://api.smith.LangChain.com"
     LANGSMITH_API_KEY: str = ""
     LANGSMITH_PROJECT: str = "LangGraph-tutorial"

@@ -5,11 +5,11 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
+from app.auth.jwt import create_access_token, hash_password, verify_password
 from app.database import async_session_factory
-from app.models.user import User
-from app.auth.jwt import hash_password, verify_password, create_access_token
-from app.schemas.auth import RegisterRequest, RegisterResponse, LoginRequest, TokenResponse
 from app.logger import get_logger
+from app.models.user import User
+from app.schemas.auth import LoginRequest, RegisterRequest, RegisterResponse, TokenResponse
 
 logger = get_logger(__name__)
 
@@ -38,11 +38,11 @@ async def register(request: RegisterRequest):
         try:
             hashed = hash_password(request.password)
         except Exception as e:
-            logger.error(f"[/register] 密码哈希失败: {e}")
+            logger.exception(f"[/register] 密码哈希失败: {e}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="密码不符合要求，请使用 6-50 个字符的密码",
-            )
+            ) from e
         user = User(
             id=user_id,
             username=request.username,

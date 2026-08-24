@@ -1,7 +1,7 @@
 """JWT 鉴权工具：密码哈希 + Token 生成/验证"""
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
@@ -54,7 +54,7 @@ def create_access_token(subject: str, expires_delta: timedelta | None = None) ->
     if expires_delta is None:
         expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    expire = datetime.now(timezone.utc) + expires_delta
+    expire = datetime.now(UTC) + expires_delta
     to_encode = {"sub": subject, "exp": expire}
 
     encoded_jwt = jwt.encode(

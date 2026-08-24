@@ -1,4 +1,8 @@
-"""Qwen3-OCR 服务封装 - 通过 Dashscope OpenAI 兼容接口调用"""
+"""Qwen3-OCR 服务封装 - 经 LangChain ChatOpenAI 调用 Dashscope OpenAI 兼容接口
+
+与主 Agent（ChatDeepSeek）共用同一套 LangChain 调用栈：调用自动进 LangSmith
+追踪，并打上 run_name/tags 标签，方便整图的统一监控与管理。
+"""
 
 import asyncio
 import json
@@ -7,18 +11,33 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
-from openai import AsyncOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
 from app.config import settings
-from app.services.image import compress_image, image_to_base64
 from app.logger import get_logger
+from app.services.image import compress_image, image_to_base64
 
 logger = get_logger(__name__)
 
-# Dashscope OpenAI 兼容端点
-_dashscope_client = AsyncOpenAI(
+# ─── LangChain LLM 实例（统一监控入口）──────────────────────────────────────
+# 选型说明（对比 langchain_community.ChatTongyi）：
+# - ChatTongyi 走 Dashscope 原生 SDK（dashscope.Generation），其多模态模型只声明
+#   支持 qwen-vl-*，不含 qwen3.5-ocr；且 async 实为 run_in_executor 线程池包装的
+#   伪异步，与 asyncio.timeout 超时熔断配合变扭。
+# - ChatOpenAI 走 Dashscope OpenAI 兼容端点（compatible-mode/v1），与线上实测路径
+#   一致，视觉 image_url 原生支持，错误类型保持 openai.APIError 体系（上层
+#   nodes.py 的 except OpenAIError 无需改动）。
+# - 两者都是标准 Runnable，调用自动进 LangSmith 追踪；此处另打 run_name/tags 标签，
+#   LangSmith 中与主 Agent 调用一目了然。将来换其他 OpenAI 兼容 OCR 服务商，
+#   只需改 DASHSCOPE_BASE_URL + QWEN_OCR_MODEL_NAME，其余代码不动。
+_ocr_llm = ChatOpenAI(
+    model=settings.QWEN_OCR_MODEL_NAME,
     api_key=settings.DASHSCOPE_API_KEY,
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    base_url=settings.DASHSCOPE_BASE_URL,
+    # OCR 是转录任务：低温降低采样随机性（qwen3.5-ocr 偶发切回"文本框数组"
+    # 模式与随机性有关，temperature=0 可进一步压低该概率）
+    temperature=0,
 )
 
 # 实测结论（2026-08-14）：
@@ -310,6 +329,7 @@ def _pass_through_b64(image_bytes: bytes) -> bool:
     """
     try:
         import io
+
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes))
@@ -317,11 +337,31 @@ def _pass_through_b64(image_bytes: bytes) -> bool:
             return False
         if max(img.size) > settings.IMAGE_TARGET_LONG_EDGE:
             return False
-        if img.getexif().get(0x0112, 1) != 1:
-            return False
-        return True
+        return img.getexif().get(274, 1) == 1
     except Exception:
         return False
+
+
+def _content_to_text(content) -> str:
+    """把模型回复的 content 归一化为纯文本
+
+    LangChain 回复 content 通常为字符串；多模态回复可能是内容块列表
+    （[{"type": "text", "text": ...}, ...]），此处兼容两种形态。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p)
+    return str(content) if content else ""
 
 
 # ─── OCR 调用 ─────────────────────────────────────────────────────────────────
@@ -333,7 +373,7 @@ async def recognize_image(image_bytes: bytes, b64_hint: str | None = None) -> st
     1. （可选）base64 直通：若图片满足直通条件（JPEG/预算内/无旋转），
        直接复用前端传来的 base64，跳过重新压缩与重新编码。
     2. 否则预处理图片（像素预算缩放 + 格式归一化）后转 base64。
-    3. 调用 Qwen3-OCR 模型识别。
+    3. 经 LangChain ChatOpenAI 调用 Qwen3-OCR 模型识别（自动进 LangSmith 追踪）。
     4. 设置超时熔断（OCR_TIMEOUT_SECONDS）。
 
     Args:
@@ -360,12 +400,11 @@ async def recognize_image(image_bytes: bytes, b64_hint: str | None = None) -> st
         b64_data = image_to_base64(compressed)
         logger.info(f"[OCR] 预处理完成 | 输出格式: {mime_type} | 大小: {len(compressed) / 1024:.1f} KB")
 
-    # 2. 构造请求
+    # 2. 构造 LangChain 消息（多模态内容块：image_url + text）
     messages = [
-        {"role": "system", "content": OCR_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
+        SystemMessage(content=OCR_SYSTEM_PROMPT),
+        HumanMessage(
+            content=[
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
@@ -374,30 +413,30 @@ async def recognize_image(image_bytes: bytes, b64_hint: str | None = None) -> st
                     "type": "text",
                     "text": "请识别这张图片中的所有文字信息。",
                 },
-            ],
-        },
+            ]
+        ),
     ]
 
-    # 3. 带超时的 API 调用
+    # 3. 带超时的 LangChain 调用（自动进 LangSmith 追踪，run_name/tags 便于整图监控）
     logger.debug(f"[OCR] 调用 Qwen 模型: {settings.QWEN_OCR_MODEL_NAME} | 超时: {settings.OCR_TIMEOUT_SECONDS}s")
     start = time.time()
     try:
         async with asyncio.timeout(settings.OCR_TIMEOUT_SECONDS):
-            response = await _dashscope_client.chat.completions.create(
-                model=settings.QWEN_OCR_MODEL_NAME,
-                messages=messages,
+            response = await _ocr_llm.ainvoke(
+                messages,
+                config={"run_name": "qwen3-ocr", "tags": ["ocr"]},
             )
-            result = response.choices[0].message.content or ""
+            result = _content_to_text(response.content)
             elapsed = time.time() - start
             logger.info(f"[OCR] 识别成功 | 耗时: {elapsed:.2f}s | 文字长度: {len(result)}")
             logger.debug(f"[OCR] 识别内容: {result[:300]}")
             return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         elapsed = time.time() - start
-        logger.error(f"[OCR] 识别超时 | 耗时: {elapsed:.2f}s | 超时限制: {settings.OCR_TIMEOUT_SECONDS}s")
+        logger.exception(f"[OCR] 识别超时 | 耗时: {elapsed:.2f}s | 超时限制: {settings.OCR_TIMEOUT_SECONDS}s")
         raise TimeoutError(
             f"OCR 识别超时（>{settings.OCR_TIMEOUT_SECONDS}s），请手动输入交易信息。"
-        )
+        ) from None
     except Exception as e:
         elapsed = time.time() - start
         logger.exception(f"[OCR] API 调用失败 | 耗时: {elapsed:.2f}s | {type(e).__name__}: {e}")

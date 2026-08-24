@@ -4,10 +4,10 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 
-from app.database import async_session_factory
-from app.models.user import User
 from app.auth.jwt import decode_access_token
+from app.database import async_session_factory
 from app.logger import get_logger
+from app.models.user import User
 
 logger = get_logger(__name__)
 

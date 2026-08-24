@@ -135,7 +135,7 @@ async function handleLogin() {
     localStorage.setItem('token', data.access_token)
     localStorage.setItem('username', loginForm.username)
     ElMessage.success('登录成功')
-    router.push('/chat')
+    router.push('/dashboard')
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '登录失败，请检查用户名和密码')
   } finally {

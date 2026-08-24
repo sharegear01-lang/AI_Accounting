@@ -60,7 +60,7 @@ def compress_image(image_bytes: bytes) -> tuple[bytes, str]:
         logger.debug(f"[Image] 无需处理，原样返回 ({len(image_bytes) / 1024:.1f} KB)")
         return image_bytes, "image/jpeg"
     else:
-        logger.debug(f"[Image] 像素数在预算内，保持原尺寸")
+        logger.debug("[Image] 像素数在预算内，保持原尺寸")
 
     # 分格式输出：数字截图/透明图走无损 PNG，其余固定质量 JPEG
     buffer = io.BytesIO()

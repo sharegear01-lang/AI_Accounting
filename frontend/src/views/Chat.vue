@@ -10,12 +10,6 @@
     </div>
     <div class="bg-msg">点击招财猫开始记账</div>
 
-    <!-- 右上角：用户信息 + 退出 -->
-    <div class="top-right">
-      <span class="username">👤 {{ username }}</span>
-      <el-button text type="danger" size="small" @click="handleLogout">退出登录</el-button>
-    </div>
-
     <!-- 招财猫（浮动精灵） -->
     <div
       class="cat-float"
@@ -53,13 +47,9 @@
 
 <script setup>
 import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
 import ManekiCat from '../components/ManekiCat.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import { useCatState } from '../composables/useCatState'
-
-const router = useRouter()
-const username = localStorage.getItem('username') || '用户'
 
 // 会话线程 ID：首次访问生成并持久化
 const threadId = localStorage.getItem('thread_id') || `web_${Date.now()}`
@@ -127,12 +117,6 @@ watch(panelOpen, (open) => {
   if (open) moveCat()
 })
 
-function handleLogout() {
-  localStorage.removeItem('token')
-  localStorage.removeItem('username')
-  router.push('/login')
-}
-
 function onResize() {
   const { w, h } = viewport()
   catPos.x = Math.min(catPos.x, w - CAT_SIZE - 20)
@@ -156,7 +140,7 @@ onUnmounted(() => {
 .desktop {
   position: relative;
   width: 100%;
-  height: 100vh;
+  height: 100%;
   overflow: hidden;
   background: linear-gradient(160deg, #fff8ec 0%, #ffeecb 45%, #ffdf9e 100%);
   user-select: none;
@@ -190,26 +174,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* ─── 右上角 ─── */
-.top-right {
-  position: absolute;
-  top: 14px;
-  right: 18px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  z-index: 30;
-}
-.username {
-  font-size: 14px;
-  color: #7a5c1e;
-  background: rgba(255, 255, 255, 0.6);
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: 1px solid rgba(240, 180, 41, 0.4);
-}
-
-/* ─── 招财猫 ─── */
+/* ─── 背景装饰 ─── */
 .cat-float {
   position: absolute;
   z-index: 20;
