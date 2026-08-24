@@ -1,10 +1,15 @@
 """Agent 工具集"""
 
 from app.agent.tools.crud import (
-    add_transaction,
+    add_transactions,
+    delete_transactions,
     query_transactions,
-    update_transaction,
-    delete_transaction,
+    update_transactions,
 )
 
-ALL_TOOLS = [add_transaction, query_transactions, update_transaction, delete_transaction]
+ALL_TOOLS = [
+    add_transactions,
+    query_transactions,
+    update_transactions,
+    delete_transactions,
+]

@@ -1,6 +1,10 @@
 <template>
   <div class="login-page">
     <div class="login-card">
+      <!-- 招财猫吉祥物：idle / wave / happy 循环 -->
+      <div class="cat-stage">
+        <ManekiCat :state="catState" :size="110" />
+      </div>
       <h1 class="title">🧾 AI 会计助手</h1>
       <p class="subtitle">自然语言记账 · 截图识别 · AI 智能问答</p>
 
@@ -61,14 +65,36 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
+import ManekiCat from '../components/ManekiCat.vue'
 
 const router = useRouter()
 const activeTab = ref('login')
 const loading = ref(false)
+
+// 招财猫循环：idle → wave → happy → idle...
+const catState = ref('idle')
+let catTimer = null
+const CAT_CYCLE = [
+  { s: 'wave', ms: 2200 },
+  { s: 'happy', ms: 1600 },
+  { s: 'idle', ms: 2600 },
+  { s: 'idle', ms: 1600 },
+]
+function catLoop() {
+  const step = CAT_CYCLE[catStep]
+  catState.value = step.s
+  catTimer = setTimeout(() => {
+    catStep = (catStep + 1) % CAT_CYCLE.length
+    catLoop()
+  }, step.ms)
+}
+let catStep = 0
+onMounted(catLoop)
+onUnmounted(() => clearTimeout(catTimer))
 
 const loginForm = reactive({ username: '', password: '' })
 const registerForm = reactive({ username: '', password: '', confirmPassword: '' })
@@ -109,7 +135,7 @@ async function handleLogin() {
     localStorage.setItem('token', data.access_token)
     localStorage.setItem('username', loginForm.username)
     ElMessage.success('登录成功')
-    router.push('/chat')
+    router.push('/dashboard')
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '登录失败，请检查用户名和密码')
   } finally {
@@ -156,6 +182,16 @@ async function handleRegister() {
   font-size: 26px;
   color: #303133;
   margin-bottom: 8px;
+}
+
+.cat-stage {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+.cat-stage:hover .maneki-cat {
+  transform: scale(1.06);
 }
 
 .subtitle {

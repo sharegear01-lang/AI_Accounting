@@ -1,573 +1,241 @@
 <template>
-  <div class="chat-page">
-    <!-- 顶部导航栏 -->
-    <header class="chat-header">
-      <div class="header-left">
-        <span class="logo">🧾</span>
-        <span class="app-title">AI 会计助手</span>
-      </div>
-      <div class="header-right">
-        <span class="username">👤 {{ username }}</span>
-        <el-button text type="danger" @click="handleLogout">退出登录</el-button>
-      </div>
-    </header>
+  <div ref="desktopRef" class="desktop">
+    <!-- 背景装饰（记账主题，低干扰） -->
+    <div class="bg-decor" aria-hidden="true">
+      <span class="deco d1">💰</span>
+      <span class="deco d2">🧾</span>
+      <span class="deco d3">📊</span>
+      <span class="deco d4">¥</span>
+      <span class="deco d5">🧮</span>
+    </div>
+    <div class="bg-msg">点击招财猫开始记账</div>
 
-    <!-- 消息列表 -->
-    <main ref="messageListRef" class="message-list" @scroll.passive>
-      <div v-if="messages.length === 0" class="empty-state">
-        <div class="empty-icon">💰</div>
-        <p class="empty-title">开始记账吧！</p>
-        <p class="empty-subtitle">支持文字描述或截图上传，例如：</p>
-        <div class="suggestion-list">
-          <el-tag
-            v-for="s in suggestions"
-            :key="s"
-            class="suggestion"
-            effect="plain"
-            @click="sendText(s)"
-          >
-            {{ s }}
-          </el-tag>
-        </div>
-      </div>
+    <!-- 招财猫（浮动精灵） -->
+    <div
+      class="cat-float"
+      :class="{ flipped: catPos.flip }"
+      :style="{ left: catPos.x + 'px', top: catPos.y + 'px' }"
+      @click="handleCatClick"
+    >
+      <ManekiCat
+        :state="catState"
+        :size="CAT_SIZE"
+        :force-closed="catState === 'sleep'"
+      />
+      <!-- 点击提示（首次） -->
+      <div v-if="showHint" class="hint-bubble">点我记账 🐱</div>
+    </div>
 
-      <div v-for="(msg, index) in messages" :key="index" class="message-row" :class="msg.role">
-        <div class="avatar">{{ msg.role === 'user' ? '🧑' : '🤖' }}</div>
-        <div class="bubble-wrapper">
-          <div class="bubble" :class="msg.role">
-            <!-- 用户消息：普通文本 -->
-            <template v-if="msg.role === 'user'">
-              <span v-if="msg.hasImage" class="msg-image">
-                <img :src="msg.image" alt="图片" />
-              </span>
-              <span class="msg-text">{{ msg.content }}</span>
-            </template>
-
-            <!-- AI 消息：markdown / HITL 卡片 / 加载中 -->
-            <template v-else>
-              <!-- HITL 确认卡片 -->
-              <ApprovalCard
-                v-if="msg.isApproval"
-                :thread-id="threadId"
-                :preview="msg.approvalPreview"
-                @resolved="handleResolved"
-              />
-              <!-- 加载指示 -->
-              <div v-else-if="msg.loading" class="typing-indicator">
-                <span></span><span></span><span></span>
-              </div>
-              <!-- 普通 AI 回复（markdown 渲染） -->
-              <div v-else class="markdown-body" v-html="renderMarkdown(msg.content)"></div>
-            </template>
-          </div>
-        </div>
-      </div>
-    </main>
-
-    <!-- 底部输入区 -->
-    <footer class="chat-footer">
-      <div v-if="pendingImage" class="image-preview-bar">
-        <div class="preview-item">
-          <img :src="pendingImage" alt="待发送图片" />
-          <el-icon class="remove-icon" @click="clearImage"><CircleCloseFilled /></el-icon>
-        </div>
-        <span class="preview-tip">将随消息一起发送，自动压缩至 512px</span>
-      </div>
-
-      <div class="input-area">
-        <el-upload
-          :show-file-list="false"
-          :before-upload="handleImageSelect"
-          accept="image/*"
-        >
-          <el-button class="upload-btn" circle>
-            <el-icon><PictureFilled /></el-icon>
-          </el-button>
-        </el-upload>
-
-        <el-input
-          v-model="inputText"
-          class="message-input"
-          type="textarea"
-          :rows="1"
-          :autosize="{ minRows: 1, maxRows: 4 }"
-          placeholder="输入记账内容，如：昨天在星巴克花了45元买咖啡"
-          resize="none"
-          @keydown.enter.exact.prevent="sendMessage"
+    <!-- 聊天面板 -->
+    <transition name="panel-pop">
+      <div v-show="panelOpen" class="panel-wrap">
+        <ChatPanel
+          :thread-id="threadId"
+          @close="panelOpen = false"
+          @minimize="panelOpen = false"
+          @sending="cat.onSending()"
+          @reply="cat.onReply"
+          @error="cat.onError()"
+          @approval="cat.onApprovalPending()"
+          @approval-resolved="cat.onApprovalResolved()"
+          @user-input="cat.onUserInput()"
         />
-
-        <el-button
-          type="primary"
-          class="send-btn"
-          :loading="sending"
-          :disabled="sending"
-          @click="sendMessage"
-        >
-          发送
-        </el-button>
       </div>
-    </footer>
+    </transition>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { PictureFilled, CircleCloseFilled } from '@element-plus/icons-vue'
-import { marked } from 'marked'
-import { api } from '../api'
-import ApprovalCard from '../components/ApprovalCard.vue'
-
-const router = useRouter()
-const username = localStorage.getItem('username') || '用户'
+import { ref, reactive, watch, onMounted, onUnmounted } from 'vue'
+import ManekiCat from '../components/ManekiCat.vue'
+import ChatPanel from '../components/ChatPanel.vue'
+import { useCatState } from '../composables/useCatState'
 
 // 会话线程 ID：首次访问生成并持久化
 const threadId = localStorage.getItem('thread_id') || `web_${Date.now()}`
 localStorage.setItem('thread_id', threadId)
 
-const inputText = ref('')
-const sending = ref(false)
-const pendingImage = ref('') // base64 待发送图片
-const messageListRef = ref(null)
+const cat = useCatState()
+// useCatState 返回普通对象内的 ref 在模板中不会自动解包 → 顶层解包
+const catState = cat.state
+const desktopRef = ref(null)
+const panelOpen = ref(false)
+const showHint = ref(true)
+const CAT_SIZE = 120
+const PANEL_W = 420
 
-const suggestions = [
-  '昨天下午在星巴克花了45元买咖啡',
-  '看看最近的账单',
-  '帮我删除最新一笔记录',
-]
+// ─── 招财猫位置控制（走动/触边掉头/避让面板）───
+const catPos = reactive({ x: 60, y: 80, flip: false })
+let moveTimer = null
 
-const messages = reactive([
-  {
-    role: 'assistant',
-    content: '你好！我是你的 AI 记账助手 📊\n\n可以这样使用我：\n- **记一笔账**：直接描述消费，如"中午吃了麦当劳花了35元"\n- **传图记账**：点击左下角图片按钮上传订单截图\n- **查询账单**：问我"这个月吃饭花了多少钱"\n- **修改/删除**：我会先展示预览，经你确认后才会执行',
-    loading: false,
-    isApproval: false,
-    hasImage: false,
+const rand = (a, b) => a + Math.random() * (b - a)
+
+function viewport() {
+  const el = desktopRef.value
+  return el ? { w: el.clientWidth, h: el.clientHeight } : { w: 1200, h: 700 }
+}
+
+function moveCat() {
+  const { w, h } = viewport()
+  const margin = 20
+  const maxX = w - CAT_SIZE - margin
+  const maxY = h - CAT_SIZE - 30 // 底部留一点
+  const minX = margin
+  const minY = margin
+  let tx = rand(minX, Math.max(minX, maxX))
+  let ty = rand(minY, Math.max(minY, maxY))
+  // 面板展开时：活动区收窄到面板左侧，避免猫走到面板下面
+  if (panelOpen.value) {
+    const limitX = w - PANEL_W - CAT_SIZE - 48
+    tx = rand(minX, Math.max(minX, Math.min(maxX, limitX)))
+  }
+  catPos.flip = tx >= catPos.x
+  catPos.x = tx
+  catPos.y = ty
+}
+
+// 猫进入 walk 状态 → 移动到随机目标（过渡由 CSS 驱动）
+watch(
+  () => catState.value,
+  (s) => {
+    if (s === 'walk') moveCat()
   },
-])
+)
 
-function renderMarkdown(text) {
-  if (!text) return ''
-  return marked.parse(text)
-}
-
-async function scrollToBottom() {
-  await nextTick()
-  if (messageListRef.value) {
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+function handleCatClick() {
+  showHint.value = false
+  cat.onUserClick()
+  panelOpen.value = !panelOpen.value
+  if (!panelOpen.value) {
+    // 收起面板后猫有更大地盘
+    moveCat()
   }
 }
 
-function addMessage(msg) {
-  messages.push(msg)
-  scrollToBottom()
+// 面板展开时若猫在面板区域，把它挪走
+watch(panelOpen, (open) => {
+  if (open) moveCat()
+})
+
+function onResize() {
+  const { w, h } = viewport()
+  catPos.x = Math.min(catPos.x, w - CAT_SIZE - 20)
+  catPos.y = Math.min(catPos.y, h - CAT_SIZE - 30)
 }
 
-// ─── 图片处理：前端压缩至 512px / 200KB ───
-function handleImageSelect(file) {
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    const img = new Image()
-    img.onload = () => {
-      // 压缩：长边归一化至 512px
-      const MAX = 512
-      let { width, height } = img
-      if (width > MAX || height > MAX) {
-        const ratio = Math.min(MAX / width, MAX / height)
-        width = Math.round(width * ratio)
-        height = Math.round(height * ratio)
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(img, 0, 0, width, height)
-      // 压缩质量（JPEG 质量 0.7，控制体积）
-      pendingImage.value = canvas.toDataURL('image/jpeg', 0.7)
-      ElMessage.success('图片已就绪，可随消息发送')
-    }
-    img.src = e.target.result
-  }
-  reader.readAsDataURL(file)
-  return false // 阻止自动上传
-}
+onMounted(() => {
+  moveCat()
+  // 首次提示 6s 后消失
+  moveTimer = setTimeout(() => { showHint.value = false }, 6000)
+  window.addEventListener('resize', onResize)
+})
 
-function clearImage() {
-  pendingImage.value = ''
-}
-
-// ─── 发送消息 ───
-function sendText(text) {
-  inputText.value = text
-  sendMessage()
-}
-
-async function sendMessage() {
-  const text = inputText.value.trim()
-  const image = pendingImage.value
-  if (!text && !image) return
-  if (sending.value) return
-
-  // 用户消息入列
-  addMessage({
-    role: 'user',
-    content: text || '(图片记账)',
-    hasImage: !!image,
-    image: image || '',
-  })
-  inputText.value = ''
-  pendingImage.value = ''
-
-  // AI 占位（加载中）
-  addMessage({ role: 'assistant', content: '', loading: true, isApproval: false, hasImage: false })
-
-  sending.value = true
-  try {
-    const data = await api.chat({
-      message: text || '请识别图片并完成记账',
-      thread_id: threadId,
-      image_base64: image ? image.split(',')[1] : null, // 去掉 data:image/jpeg;base64, 前缀
-    })
-    // 移除加载占位
-    const loadingIdx = messages.findIndex((m) => m.loading)
-    if (loadingIdx !== -1) messages.splice(loadingIdx, 1)
-
-    const reply = data.reply || ''
-    // 检测 HITL interrupt 预览
-    const isApproval = reply.includes('请回复"确认"批准操作')
-    addMessage({
-      role: 'assistant',
-      content: reply,
-      loading: false,
-      isApproval,
-      approvalPreview: isApproval ? reply.replace(/\n*请回复"确认"批准操作，或回复"取消"拒绝。\s*$/, '') : '',
-      hasImage: false,
-    })
-  } catch (e) {
-    const loadingIdx = messages.findIndex((m) => m.loading)
-    if (loadingIdx !== -1) messages.splice(loadingIdx, 1)
-    addMessage({
-      role: 'assistant',
-      content: `❌ 请求失败：${e.response?.data?.detail || e.message || '未知错误'}`,
-      loading: false,
-      isApproval: false,
-      hasImage: false,
-    })
-  } finally {
-    sending.value = false
-    scrollToBottom()
-  }
-}
-
-// HITL 批准/拒绝完成后，将结果作为 AI 消息追加
-function handleResolved(reply) {
-  if (reply) {
-    addMessage({
-      role: 'assistant',
-      content: reply,
-      loading: false,
-      isApproval: false,
-      hasImage: false,
-    })
-  }
-}
-
-function handleLogout() {
-  localStorage.removeItem('token')
-  localStorage.removeItem('username')
-  router.push('/login')
-}
-
-onMounted(scrollToBottom)
+onUnmounted(() => {
+  clearTimeout(moveTimer)
+  window.removeEventListener('resize', onResize)
+})
 </script>
 
 <style scoped>
-.chat-page {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  max-width: 900px;
-  margin: 0 auto;
-  background: #fff;
-  box-shadow: 0 0 30px rgba(0, 0, 0, 0.08);
-}
-
-/* 顶部 */
-.chat-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 24px;
-  border-bottom: 1px solid #e4e7ed;
-  background: #fff;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.logo {
-  font-size: 22px;
-}
-
-.app-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.username {
-  color: #606266;
-  font-size: 14px;
-}
-
-/* 消息列表 */
-.message-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px 24px;
-  background: #f7f8fa;
-}
-
-.empty-state {
-  text-align: center;
-  padding: 80px 0;
-}
-
-.empty-icon {
-  font-size: 56px;
-  margin-bottom: 16px;
-}
-
-.empty-title {
-  font-size: 18px;
-  color: #303133;
-  margin-bottom: 8px;
-}
-
-.empty-subtitle {
-  color: #909399;
-  font-size: 13px;
-  margin-bottom: 20px;
-}
-
-.suggestion-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: center;
-}
-
-.suggestion {
-  cursor: pointer;
-  padding: 6px 16px;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.suggestion:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-}
-
-/* 消息行 */
-.message-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.message-row.user {
-  flex-direction: row-reverse;
-}
-
-.avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  background: #e4e7ed;
-  flex-shrink: 0;
-}
-
-.bubble-wrapper {
-  max-width: 75%;
-  display: flex;
-  flex-direction: column;
-}
-
-.bubble {
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 14px;
-  line-height: 1.6;
-  word-break: break-word;
-}
-
-.bubble.user {
-  background: #409eff;
-  color: #fff;
-  border-top-right-radius: 2px;
-}
-
-.bubble.assistant {
-  background: #fff;
-  border: 1px solid #e4e7ed;
-  border-top-left-radius: 2px;
-}
-
-.msg-image {
-  display: block;
-  margin-bottom: 8px;
-}
-
-.msg-image img {
-  max-width: 220px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-}
-
-/* Markdown 表格等样式 */
-.markdown-body :deep(table) {
-  border-collapse: collapse;
-  margin: 8px 0;
-  font-size: 13px;
-}
-
-.markdown-body :deep(th),
-.markdown-body :deep(td) {
-  border: 1px solid #dcdfe6;
-  padding: 6px 10px;
-  text-align: left;
-}
-
-.markdown-body :deep(th) {
-  background: #f5f7fa;
-}
-
-.markdown-body :deep(pre) {
-  background: #f5f7fa;
-  padding: 8px;
-  border-radius: 4px;
-  overflow-x: auto;
-  font-size: 12px;
-}
-
-.markdown-body :deep(code) {
-  background: #f5f7fa;
-  padding: 2px 4px;
-  border-radius: 3px;
-  font-size: 12px;
-}
-
-/* 打字指示器 */
-.typing-indicator {
-  display: flex;
-  gap: 5px;
-  padding: 4px 0;
-}
-
-.typing-indicator span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #909399;
-  animation: blink 1.4s infinite both;
-}
-
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.2s;
-}
-
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-@keyframes blink {
-  0%, 80%, 100% { opacity: 0.3; }
-  40% { opacity: 1; }
-}
-
-/* 底部输入区 */
-.chat-footer {
-  border-top: 1px solid #e4e7ed;
-  padding: 12px 24px 20px;
-  background: #fff;
-}
-
-.image-preview-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-  padding: 8px;
-  background: #f5f7fa;
-  border-radius: 8px;
-}
-
-.preview-item {
+.desktop {
   position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: linear-gradient(160deg, #fff8ec 0%, #ffeecb 45%, #ffdf9e 100%);
+  user-select: none;
 }
 
-.preview-item img {
-  width: 56px;
-  height: 56px;
-  object-fit: cover;
-  border-radius: 6px;
-}
-
-.remove-icon {
+/* ─── 背景装饰 ─── */
+.bg-decor {
   position: absolute;
-  top: -6px;
-  right: -6px;
-  font-size: 18px;
-  color: #f56c6c;
+  inset: 0;
+  pointer-events: none;
+}
+.deco {
+  position: absolute;
+  font-size: 42px;
+  opacity: 0.12;
+}
+.d1 { top: 12%; left: 8%; transform: rotate(-12deg); }
+.d2 { top: 22%; right: 12%; transform: rotate(10deg); }
+.d3 { bottom: 18%; left: 16%; transform: rotate(6deg); }
+.d4 { bottom: 30%; right: 22%; font-size: 64px; font-weight: 700; color: #b8956a; }
+.d5 { top: 60%; left: 46%; transform: rotate(-8deg); }
+
+.bg-msg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 15px;
+  color: rgba(122, 92, 30, 0.35);
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+
+/* ─── 背景装饰 ─── */
+.cat-float {
+  position: absolute;
+  z-index: 20;
   cursor: pointer;
+  transition: left 4.5s linear, top 4.5s linear;
+  will-change: left, top;
+}
+.cat-float.flipped {
+  transform: scaleX(-1);
+  transition: left 4.5s linear, top 4.5s linear, transform 0.4s ease;
+}
+.cat-float:hover {
+  filter: drop-shadow(0 4px 10px rgba(184, 149, 106, 0.35));
+}
+
+.hint-bubble {
+  position: absolute;
+  top: -34px;
+  left: 50%;
+  transform: translateX(-50%);
   background: #fff;
-  border-radius: 50%;
+  border: 1px solid #f0b429;
+  color: #7a5c1e;
+  font-size: 13px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  animation: hint-bob 1.6s ease-in-out infinite;
+}
+.hint-bubble::after {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #f0b429;
+  border-bottom: none;
+}
+@keyframes hint-bob {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50% { transform: translateX(-50%) translateY(-5px); }
 }
 
-.preview-tip {
-  color: #909399;
-  font-size: 12px;
+/* ─── 聊天面板 ─── */
+.panel-wrap {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  width: 420px;
+  height: min(620px, calc(100vh - 60px));
+  z-index: 40;
 }
-
-.input-area {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
+.panel-pop-enter-active,
+.panel-pop-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
 }
-
-.upload-btn {
-  flex-shrink: 0;
-}
-
-.message-input {
-  flex: 1;
-}
-
-.message-input :deep(.el-textarea__inner) {
-  box-shadow: none;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  font-size: 14px;
-}
-
-.send-btn {
-  flex-shrink: 0;
-  height: 36px;
-  padding: 0 22px;
+.panel-pop-enter-from,
+.panel-pop-leave-to {
+  opacity: 0;
+  transform: scale(0.92) translateY(10px);
 }
 </style>

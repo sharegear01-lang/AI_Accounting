@@ -1,0 +1,46 @@
+[tool.pytest.ini_options]
+# 默认只收集纯单元测试（mock，无外部依赖）：
+# - test_preprocess.py：图级单测（OCR/LLM 全 mock）
+# 其余 test_*.py 是需要真实服务/DB/LLM API 的集成冒烟脚本，由 CI 之外的
+# 手动流程执行（python test_xxx.py），不纳入 pytest 默认收集。
+testpaths = ["test_preprocess.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F：错误与未定义引用（硬门禁）；I：import 排序；UP：现代语法；
+# B：常见 bug 模式；SIM：可简化模式；RUF：ruff 专属；TRY：异常处理；PIE：多余结构
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TRY", "PIE"]
+ignore = [
+    # B008：FastAPI 的 Depends()/Query() 作为参数默认值是官方标准写法，非误用
+    "B008",
+    # BLE001：项目多处"异常兜底→返回错误给 LLM/用户"是有意设计
+    #（OCR 服务、CRUD 工具），不做盲捕获告警
+    "BLE001",
+    # DTZ011：记账日期统一使用服务器本地日期（产品决策，见 PRD），不做时区告警
+    "DTZ011",
+    # RUF001/002/003：中文全角标点是项目注释/文档的标准写法，非歧义字符
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # E501：中文日志/注释行常超 120 列，行宽非硬性门禁
+    "E501",
+    # TRY300/301/003：try/except 结构风格建议，改动风险大于收益，保持现状
+    "TRY300",
+    "TRY301",
+    "TRY003",
+    # TRY401：logger.exception(f"...{e}") 重复异常对象——项目统一风格，
+    # exception 已自动附加异常，冗余占位不影响正确性
+    "TRY401",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 迁移脚本由 alembic autogenerate 生成 + 手工幂等化，跳过 lint
+"alembic/**" = ["E501", "E402", "I001", "UP035", "UP007"]
+# main.py 路由注册使用底部延迟导入（避免循环依赖，FastAPI 常见模式）
+"main.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"

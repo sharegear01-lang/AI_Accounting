@@ -33,12 +33,22 @@ Thumbs.db
 *.png
 graph.png
 logs/
+.langgraph_api/
 
 # ===== 测试/临时 =====
+# 手工测试用的交易单据样本图（不入库）
+test_image*.jpg
+# 集成冒烟脚本（依赖真实服务/DB/LLM，手动执行，不入库）
 test_*.py
+# 但图级单元测试（全 mock，CI 执行）必须入库
+!test_preprocess.py
 
 # ===== 前端 Vue3 =====
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/*.local
+frontend/certs/   # 本地 HTTPS 证书/私钥（scripts/https-setup.ps1 生成，绝不入库）
+
+# ===== 本地 HTTPS 证书（scripts/https-setup.ps1 生成）=====
+frontend/certs/

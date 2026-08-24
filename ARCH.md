@@ -32,27 +32,50 @@
 
 ```python
 class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    current_user_id: str
+    messages: Annotated[list, add_messages]   # 对话历史（含 OCR 增强后的文本）
+    current_user_id: str                       # 当前登录用户（JWT 注入，多租户隔离）
+    user_input: str                            # 本次请求原始文本（preprocess 消费后清空）
+    ocr_block: dict | None                     # OCR 防幻觉拦截信息（respond_blocked 消费后清空）
 ```
 
-### 节点 (Nodes) - MVP
+> **图片不经过 state**：图片 base64 经 `config["configurable"]["image_base64"]`
+> 传入 preprocess 节点，避免 checkpointer 持久化图片字节（隐私 + 体积）。
 
-- **preprocess_node**：接收用户输入。若有图片，调用 Qwen3-OCR 转写为文本，拼接到 user_message。
-- **agent_node**：绑定工具集（add_transaction, query_transactions），调用 DeepSeek 推理。
-- **tools_node**：执行工具调用并返回结果。
+### 节点 (Nodes)
 
-### 边 (Edges) - MVP
+- **preprocess_node**：接收 `user_input`（+ 可选图片）。有图片时调用 Qwen3-OCR
+  识别，过**防幻觉闸门**：识别失败 / 金额不可信 → 写入 `ocr_block` 走拦截分支，
+  绝不进入 agent（防 LLM 猜金额记账）；识别成功 → 组装含 OCR 上下文的 HumanMessage。
+  无图片时直接透传用户文本。
+- **respond_blocked_node**：OCR 拦截回复节点，直接返回错误提示，不调用 LLM。
+- **agent_node**：绑定工具集（add/query/update/delete + 批量版），调用 DeepSeek 推理。
+- **tools_node**：执行工具调用，强制注入 `current_user_id`（防越权）。
+
+### 边 (Edges)
 
 ```
-START -> preprocess_node -> agent_node
-agent_node -> tools_node (有工具调用) / END (无工具调用)
-tools_node -> agent_node (工具结果返回后继续推理)
+START -> preprocess
+preprocess -> respond_blocked (OCR 拦截) / agent (正常)
+agent -> tools (有工具调用) / END (无工具调用)
+tools -> agent
+respond_blocked -> END
 ```
 
-### Phase 2 扩展节点
+### HITL 人工复核（修改/删除）
 
-- **human_review_node**：处理 update/delete，触发 interrupt 挂起等待人工响应。
+- update/delete 工具内 `interrupt()` 暂停（无需独立节点），预览含完整明细，
+  interrupt payload 携带与预览一致的结构化数据（transaction_ids / fields）。
+- 审批恢复由 API 层 `_resume_graph` 从 checkpoint 读取 interrupt payload，
+  调用公共执行函数 `execute_delete` / `execute_update` 后 `aupdate_state` 修补。
+  **不迁移 `Command(resume)`**：LangGraph 1.2.9 的 resume 语义为重放整个
+  tools 节点，已完成工具会被重复执行（官方已知缺陷，PR #3126 修复未合并），
+  手动执行路径可精确控制（见 PROJECT_STATE 决策记录）。
+
+### 多租户隔离
+
+- 工具**不暴露 user_id 参数**：当前用户 ID 由 JWT 鉴权写入
+  `config["configurable"]["user_id"]`，经 LangChain 自动注入工具 config 参数，
+  LLM 看不到也无法伪造，从根源杜绝跨用户越权。
 
 ## 4. OCR 标准化处理流程
 
@@ -154,7 +177,7 @@ frontend/
 
 - 所有请求走 `/api` 前缀，Vite dev 代理转发至 `http://127.0.0.1:8000`。
 - JWT token 存 localStorage，axios 请求拦截器自动附加 `Authorization: Bearer`。
-- HITL：后端 interrupt 预览回复含"请回复确认批准操作"，前端检测后渲染 ApprovalCard，点击批准/拒绝调用 `/api/approve/{thread_id}` / `/api/reject/{thread_id}`。
+- HITL：interrupt 暂停时 `/chat` 返回结构化响应（`requires_confirmation=true` + `preview` + `expires_in_seconds`），前端据此渲染 ApprovalCard 的『同意/拒绝』按钮；点击后带 `approve` 字段重新请求 `/chat`，后端直接恢复被暂停的图（不再使用自然语言“确认/取消”，避免误判）。确认超时（`HITL_EXPIRY_SECONDS`，默认 300s）或用户发新消息打断时自动按拒绝取消，防止 interrupt 永久挂起；新消息打断会返回 `cancelled_confirmations` 数量，前端把仍在展示的确认卡片标记为『已取消』，避免点击失效按钮得到“无需重复确认”的困惑提示。
 - 图片：前端 canvas 压缩至长边 512px / JPEG 0.7，转 base64 随聊天发送。
 
 ## 8. 部署方案

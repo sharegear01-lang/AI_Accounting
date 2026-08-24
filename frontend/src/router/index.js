@@ -1,13 +1,24 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Login from '../views/Login.vue'
+import MainLayout from '../layouts/MainLayout.vue'
+import Dashboard from '../views/Dashboard.vue'
+import Transactions from '../views/Transactions.vue'
 import Chat from '../views/Chat.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/chat' },
     { path: '/login', name: 'login', component: Login },
-    { path: '/chat', name: 'chat', component: Chat },
+    {
+      path: '/',
+      component: MainLayout,
+      redirect: '/dashboard',
+      children: [
+        { path: 'dashboard', name: 'dashboard', component: Dashboard },
+        { path: 'transactions', name: 'transactions', component: Transactions },
+        { path: 'chat', name: 'chat', component: Chat },
+      ],
+    },
   ],
 })
 
@@ -18,7 +29,7 @@ router.beforeEach((to) => {
     return { name: 'login' }
   }
   if (to.name === 'login' && token) {
-    return { name: 'chat' }
+    return { name: 'dashboard' }
   }
   return true
 })

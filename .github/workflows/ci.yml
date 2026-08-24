@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint / migrations / tests / smoke)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: ai_acct
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U admin -d ai_acct"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://admin:secret@localhost:5432/ai_acct
+      # 测试/冒烟不调用真实 LLM 与 OCR（单测全 mock），仅需非空占位
+      DEEPSEEK_API_KEY: ""
+      DASHSCOPE_API_KEY: ""
+      SECRET_KEY: ci-only-placeholder-secret
+      LANGSMITH_TRACING: "false"
+      DEBUG: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest ruff
+
+      - name: Lint (ruff)
+        run: ruff check . --exclude frontend mobile
+
+      - name: Migration round-trip on fresh DB
+        # 新库：upgrade 建表 → downgrade 清空 → upgrade 重建（验证迁移可逆）
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Schema drift check
+        # alembic check：模型与迁移后的库不一致时 exit 1
+        run: alembic check
+
+      - name: Unit tests (mock, no external API)
+        run: pytest -v
+
+      - name: App startup smoke test
+        # 验证 lifespan 全链路：自动迁移 + checkpointer 初始化 + /health
+        run: |
+          python -m uvicorn main:app --host 127.0.0.1 --port 8000 > /tmp/uvicorn.log 2>&1 &
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8000/health | grep -q '"ok"' || { echo "启动冒烟失败，日志："; cat /tmp/uvicorn.log; kill $APP_PID 2>/dev/null; exit 1; }
+          kill $APP_PID 2>/dev/null
+          echo "启动冒烟通过：迁移 + checkpointer + /health OK"
+
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
